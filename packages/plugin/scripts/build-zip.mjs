@@ -218,6 +218,43 @@ console.log(`  + migrations/ verified (${stagedMigrations.length} codegen'd + ch
   }
 }
 
+// --- sourcemaps ------------------------------------------------------------
+// Stripped from the ARCHIVE, not from the build. `.map` sits in core's ZIP
+// extension allowlist (middleware/src/plugins/zipExtractor.ts:28), so nothing
+// downstream rejects one and nothing downstream reads one either: no operator
+// opens devtools against a plugin bundle inside core's sandboxed iframe, and
+// the plugin's own `dist/` runs server-side where the map is never fetched.
+// It is dead weight that is also a disclosure — a `.js.map` carries the full
+// original TypeScript, so shipping it publishes the plugin's source into every
+// installation that ever unzips it.
+//
+// The weight is not marginal. The UI map alone was 1,196,047 bytes against a
+// 292,797-byte bundle: 80% of the uncompressed payload, and 284 KB of the
+// 965 KB archive, to carry something no consumer reads.
+//
+// Pruned from the stage rather than excluded at zip time because `createFlatZip`
+// has three backends and only `zip` honours `-x` patterns — a stage-level delete
+// is the only form that holds identically on all three.
+{
+  const pruned = [];
+  const prune = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) prune(join(dir, entry.name), rel);
+      else if (entry.name.toLowerCase().endsWith('.map')) {
+        const bytes = statSync(join(dir, entry.name)).size;
+        rmSync(join(dir, entry.name));
+        pruned.push({ rel, bytes });
+      }
+    }
+  };
+  prune(stageDir, '');
+  const saved = pruned.reduce((n, p) => n + p.bytes, 0);
+  // Count and weight, not the roll call: 145 filenames scrolls the build log
+  // past everything else it just said.
+  console.log(`  - ${pruned.length} sourcemap(s) pruned (${saved} bytes)`);
+}
+
 // --- package.json, without devDependencies ---------------------------------
 // devDependencies are meaningless inside a published artifact — nothing ever
 // installs them from a plugin ZIP — and in this repo they point at a sibling
@@ -249,7 +286,9 @@ console.log(`✓ built ${zipPath} (${statSync(zipPath).size} bytes)`);
  * for that, since pointing it at the directory itself would nest one level.
  */
 function createFlatZip({ zipPath, stageDir }) {
-  const EXCLUDES = ['*.DS_Store', 'node_modules/*', '*.tsbuildinfo'];
+  // `*.map` is belt-and-braces: the stage prune above already removed them,
+  // and only the `zip` backend honours these patterns at all.
+  const EXCLUDES = ['*.DS_Store', 'node_modules/*', '*.tsbuildinfo', '*.map'];
   const strategies = [
     {
       label: 'zip',

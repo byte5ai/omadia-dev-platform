@@ -142,7 +142,23 @@ export interface DevPlatformPluginContext {
     ): () => void;
   };
   readonly tools: {
-    register(spec: unknown, options?: { promptDoc?: string }): () => void;
+    /**
+     * Full registration: spec + handler + options, mirroring core's
+     * `ToolsAccessor.register` (@omadia/plugin-api pluginContext.d.ts). The
+     * `handler` slot was MISSING from this hand-narrowed type, and that
+     * omission is what caused the P5 activation failure: with nowhere to pass
+     * a handler, activate() reached for `registerHandler` as well, and the two
+     * are alternative doors into one name-keyed kernel map that both throw on
+     * duplicate. A structural type narrower than the real contract does not
+     * merely under-describe it — here it made the correct call unwritable.
+     */
+    register(
+      spec: unknown,
+      handler: (input: unknown) => Promise<string>,
+      options?: { promptDoc?: string },
+    ): () => void;
+    /** ONLY for tools whose spec the KERNEL emits (e.g. `memory_20250818`).
+     *  Not these — see the registration site below. */
     registerHandler(name: string, handler: (input: unknown) => Promise<string>, options?: { promptDoc?: string }): () => void;
   };
   readonly uiRoutes: { registerNav(entry: unknown): () => void };
@@ -376,12 +392,25 @@ async function activateInner(
         getCallerUserId: () => turnContext.current()?.userId,
       });
       for (const reg of chatTools.registrations) {
+        // ONE call, not two. `register` and `registerHandler` are ALTERNATIVE
+        // doors into the same name-keyed map in the kernel's NativeToolRegistry
+        // (harness-orchestrator/src/nativeToolRegistry.ts:148 and :198) and both
+        // THROW on a name already present — they do not compose. Calling both
+        // for one name registered the handler, then threw
+        // `duplicate native-tool name 'dev_job_start'` on the very first tool,
+        // which failed activate() and rolled the whole plugin back.
+        //
+        // `register(spec, handler, options)` is the full path and already
+        // carries the handler; `registerHandler(name, handler)` exists only for
+        // tools whose spec the KERNEL emits (e.g. `memory_20250818`), which is
+        // not these. The old second call also passed no handler at all
+        // (`register(reg.spec)` — arity 1 against a 3-arg signature), so even
+        // without the throw the tool would have dispatched to `undefined`.
         disposers.push(
-          ctx.tools.registerHandler(reg.name, reg.handler, {
+          ctx.tools.register(reg.spec, reg.handler, {
             ...(reg.promptDoc ? { promptDoc: reg.promptDoc } : {}),
           }),
         );
-        disposers.push(ctx.tools.register(reg.spec));
       }
       log(
         '[dev-platform] chat orchestrator tools registered (dev_job_start / dev_job_status / dev_job_list)',
