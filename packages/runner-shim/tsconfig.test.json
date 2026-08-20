@@ -1,0 +1,21 @@
+{
+  // Emit src + test as real ESM files under `.test-build/`, preserving the
+  // directory shape, so `node --test` runs the tree as written.
+  //
+  // Deliberately NOT a bundle: `src/index.ts` self-invokes behind an
+  // `import.meta.url === process.argv[1]` main guard, and `index.test.ts`
+  // spawns that emitted file as a child process. A bundler collapses module
+  // identity and the guard silently stops firing — the suite then tests a code
+  // path the image never takes.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": true,
+    "outDir": ".test-build",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src", "test"],
+  "exclude": ["dist", ".test-build", "node_modules"]
+}

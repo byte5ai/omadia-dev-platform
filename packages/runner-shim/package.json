@@ -1,0 +1,35 @@
+{
+  "name": "@omadia/dev-runner-shim",
+  "version": "0.2.0",
+  "private": true,
+  "description": "The dev-platform runner shim: clones a repo read-only, drives the headless Claude CLI, translates its stream-json to runner events, and uploads a diff. Node builtins only — never imports the host. Ships as the dev-runner image entrypoint, and as the child process the unsafe local backend spawns. Moved out of omadia core in epic byte5ai/omadia#470 P4.",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "//test": "tsc-then-run, NOT bundle-then-run. `src/index.ts` self-invokes behind an `import.meta.url` main guard and several suites spawn it as a child process; a bundler rewrites module identity and that guard stops meaning what it says. Emitting real files keeps the tested tree shaped like the shipped one.",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/test/*.test.js",
+    "clean": "rm -rf dist .test-build *.tsbuildinfo"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/byte5ai/omadia-dev-platform",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/byte5ai/omadia-dev-platform.git",
+    "directory": "packages/runner-shim"
+  }
+}
