@@ -5,14 +5,16 @@
   "type": "module",
   "description": "The Omadia Dev Platform, extracted from omadia core as an installable plugin (epic byte5ai/omadia#470).",
   "license": "MIT",
+  "//workspaces": "`sidecars/dev-runner-daemon` is a workspace member even though it is not under `packages/`: it is a deployable container, not a library, and it must never be mistaken for something the plugin ZIP ships. Being a member is still what gives it ONE typescript, ONE @types/node and one lockfile for the whole repo.",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "sidecars/dev-runner-daemon"
   ],
   "//typecheck": "packages/plugin resolves @omadia/dev-platform-plugin-api through its emitted .d.ts, so the API package is BUILT before anything is type-checked. You cannot type-check against declarations that do not exist yet.",
   "scripts": {
-    "build": "npm run build -w packages/plugin-api && npm run build -w packages/plugin",
+    "build": "npm run build -w packages/plugin-api && npm run build -w packages/plugin && npm run build -w packages/runner-shim",
     "typecheck": "npm run build -w packages/plugin-api && npm run typecheck --workspaces --if-present",
-    "test": "npm run test -w packages/plugin",
+    "test": "npm run test -w packages/plugin && npm run test -w packages/runner-shim && npm run test -w sidecars/dev-runner-daemon",
     "package": "npm run package -w packages/plugin",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules",
     "link:core": "node scripts/link-core.mjs",

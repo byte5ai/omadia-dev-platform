@@ -1,0 +1,30 @@
+{
+  "name": "@omadia/dev-runner-daemon",
+  "version": "0.2.0",
+  "private": true,
+  "description": "The dev-platform runner daemon: a bearer-authed control-plane HTTP API over dockerode that provisions and reaps hardened job containers inside a dedicated docker:dind engine, and the default-deny egress proxy that is the only path from a job container to the internet. STANDALONE — dockerode + zod + node builtins only, never imports the host. Moved out of omadia core in epic byte5ai/omadia#470 P4.",
+  "type": "module",
+  "//typescript": "typescript and @types/node come from the workspace root so the whole repo compiles with ONE compiler. `@types/dockerode` stays local — nothing else in the repo touches dockerode.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "clean": "rm -rf *.tsbuildinfo"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.31"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/byte5ai/omadia-dev-platform",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/byte5ai/omadia-dev-platform.git",
+    "directory": "sidecars/dev-runner-daemon"
+  }
+}
