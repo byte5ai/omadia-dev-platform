@@ -6,8 +6,13 @@ Node 22 (`nvm use 22.22.3`). Clone [byte5ai/omadia][omadia] as a sibling
 directory named `odoo-bot`, build its plugin-api once, then install here:
 
 ```bash
-cd ../odoo-bot/middleware/packages/plugin-api && npm install && npm run build
-cd -                                          && npm install
+# from `middleware`, NOT from `packages/plugin-api` — that directory is inside
+# an npm workspace root and an install started there is hijacked to the root.
+cd ../odoo-bot/middleware
+npm install --no-workspaces typescript @types/node
+./node_modules/.bin/tsc -p packages/plugin-api   # `npx tsc` silently installs the WRONG tsc
+cd -
+npm install
 ```
 
 [omadia]: https://github.com/byte5ai/omadia

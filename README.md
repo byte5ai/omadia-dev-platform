@@ -93,9 +93,20 @@ Two consequences worth knowing before the first confusing error:
 
 1. **The sibling must be built.** `middleware/packages/plugin-api/dist/` is
    gitignored in core, and `tsconfig.json` here resolves the package through its
-   emitted `.d.ts`. Run `npm run build` inside
-   `odoo-bot/middleware/packages/plugin-api` once. It needs only `typescript`
-   and `@types/node` — no core install.
+   emitted `.d.ts`. Build it once:
+
+   ```bash
+   cd ../odoo-bot/middleware
+   npm install --no-workspaces typescript @types/node
+   ./node_modules/.bin/tsc -p packages/plugin-api
+   ```
+
+   Run it from `middleware`, not from `packages/plugin-api`: that directory sits
+   inside an npm **workspace root**, so an install started there is hijacked to
+   the root and leaves the package's own `node_modules` empty. And invoke the
+   compiler by path — a bare `npx tsc` does not fail when TypeScript is missing,
+   it downloads an unrelated abandoned `tsc` package instead. Both of these cost
+   a red CI run already; the workflow carries the same notes.
 2. **The dependency is types-only.** Every import of it is `import type` and
    vanishes from the emitted JavaScript, so the shipped ZIP has no runtime
    dependency on core's package at all. `npm run package` strips

@@ -41,20 +41,34 @@ jobs:
 
       # `middleware/packages/plugin-api/dist/` is gitignored in core, and this
       # repo's tsconfig resolves the package through its emitted .d.ts — so the
-      # sibling has to be built, not merely present. It has no dependencies of
-      # its own: typescript + @types/node are the whole toolchain, which is why
-      # core's middleware is never installed here.
+      # sibling has to be built, not merely present.
+      #
+      # Two traps live in this step, both of which have already cost a red run:
+      #
+      #  1. `middleware/package.json` is an npm WORKSPACE ROOT (`packages/*`).
+      #     An `npm install` run from inside `packages/plugin-api` is hijacked
+      #     by it and installs to the workspace root instead, leaving
+      #     `packages/plugin-api/node_modules` empty. Hence: install from
+      #     `middleware` with `--no-workspaces`, which also stops npm from
+      #     installing all of core's other packages.
+      #  2. `npx tsc` does NOT fail when TypeScript is absent — it silently
+      #     downloads the unrelated `tsc` package from npm (an abandoned
+      #     placeholder) and exits 1 with a confusing message. Always invoke the
+      #     compiler by explicit path.
+      #
+      # plugin-api has no dependencies of its own: typescript + @types/node are
+      # the whole toolchain, which is why core's middleware is never installed.
       - name: Build @omadia/plugin-api from the sibling checkout
-        working-directory: odoo-bot/middleware/packages/plugin-api
+        working-directory: odoo-bot/middleware
         run: |
-          npm install --ignore-scripts --no-save --no-package-lock \
+          npm install --ignore-scripts --no-save --no-package-lock --no-workspaces \
             typescript@^6.0.2 @types/node@^25.6.0
-          npx tsc
-          test -f dist/index.d.ts
+          ./node_modules/.bin/tsc -p packages/plugin-api
+          test -f packages/plugin-api/dist/index.d.ts
 
       - name: Install
         working-directory: omadia-dev-platform
-        run: npm install
+        run: npm ci
 
       - name: Typecheck
         working-directory: omadia-dev-platform
