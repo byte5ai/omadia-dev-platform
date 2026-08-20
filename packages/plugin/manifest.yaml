@@ -165,11 +165,19 @@ setup:
       deliberate: both modes put a credential or your host filesystem within
       reach of code an agent wrote.
 
-      ### After installing
+      ### After installing — you re-enter the credentials
 
       Connect a repository under **Dev Platform → Repositories**. A GitHub App
       is the recommended credential — the runner then receives a freshly minted,
       single-repo, read-only token that is revoked when the job ends.
+
+      **GitHub App keys and repository tokens are not migrated for you.** This
+      plugin stores credentials in its own vault namespace, so App private keys,
+      webhook secrets and per-repo clone tokens are entered here once, by you.
+      That is a deliberate choice over a one-time migration hook: the right
+      moment to see that a GitHub App private key has moved into a plugin's
+      namespace is while it is happening. The same applies after a reinstall.
+      See `docs/SECRETS.md` for the full list and for rotation.
     de: |
       ## Dev Platform
 
@@ -211,12 +219,21 @@ setup:
       Credential oder dein Host-Dateisystem in Reichweite von Code, den ein Agent
       geschrieben hat.
 
-      ### Nach der Installation
+      ### Nach der Installation — die Credentials trägst du selbst ein
 
       Verbinde ein Repository unter **Dev Platform → Repositories**. Eine GitHub
       App ist die empfohlene Credential — der Runner bekommt dann ein frisch
       erzeugtes, auf ein Repo begrenztes Lese-Token, das am Job-Ende widerrufen
       wird.
+
+      **GitHub-App-Keys und Repo-Tokens werden nicht automatisch übernommen.**
+      Das Plugin legt Credentials in seinem eigenen Vault-Namespace ab; App
+      Private Keys, Webhook-Secrets und Clone-Tokens trägst du also einmal
+      selbst ein. Das ist bewusst so entschieden — statt eines einmaligen
+      Migrations-Hooks im Core: Der richtige Zeitpunkt zu sehen, dass ein
+      GitHub-App-Private-Key in den Namespace eines Plugins wandert, ist genau
+      dann, wenn es passiert. Nach einer Neuinstallation gilt dasselbe. Die
+      vollständige Liste und die Rotation stehen in `docs/SECRETS.md`.
 
   fields:
     # --- reachability -------------------------------------------------------

@@ -18,6 +18,8 @@
  */
 
 import { strict as assert } from 'node:assert';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
@@ -321,5 +323,56 @@ describe('verifyRunnerImage — regexp argv', () => {
     assert.deepEqual(out, { verified: false, skipped: true, reason: 'no-identity' });
     assert.equal(calls.length, 0);
     assert.equal(logger.warns.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Publisher ↔ consumer. The two ends of one contract, in two repositories'
+// worth of file formats, with nothing but agreement holding them together.
+// ---------------------------------------------------------------------------
+
+describe('the release workflow and the daemon agree', () => {
+  const workflowPath = resolve(process.cwd(), '..', '..', '.github', 'workflows', 'release-runner-image.yml');
+  const workflow = readFileSync(workflowPath, 'utf8');
+
+  it('the workflow verifies with the EXACT regexp the daemon enforces', () => {
+    // The workflow re-verifies its own freshly-signed image before it finishes.
+    // That check is only worth something if it uses the pattern the daemon will
+    // use — a signature the consumer would reject is not a signature, and CI is
+    // the only place that can be discovered before an operator's daemon refuses
+    // to boot on it. The regexp cannot be imported into YAML, so it is pinned.
+    assert.ok(
+      workflow.includes(DEFAULT_TRANSITION_IDENTITY_REGEXP),
+      'release-runner-image.yml does not contain DEFAULT_TRANSITION_IDENTITY_REGEXP verbatim — ' +
+        'the publisher and the consumer have drifted',
+    );
+  });
+
+  it('the identity the workflow will actually be signed with matches', () => {
+    // `PLUGIN_SIGNER_IDENTITY` is a hand-written URL that has to equal
+    // `https://github.com/<owner>/<repo>/.github/workflows/<file>`. Rename the
+    // workflow file and every future image becomes unverifiable, with nothing
+    // in the build to say so — the failure would first appear as a daemon
+    // refusing to start, days later, on someone else's deployment.
+    const expected =
+      'https://github.com/byte5ai/omadia-dev-platform/.github/workflows/release-runner-image.yml';
+    assert.equal(PLUGIN_SIGNER_IDENTITY, expected);
+    assert.ok(existsSync(workflowPath), `${expected} names a workflow file that does not exist`);
+    assert.match(workflow, /^name:\s*release-runner-image\s*$/m);
+  });
+
+  it('the workflow grants the two permissions keyless signing needs', () => {
+    // `id-token: write` mints the Fulcio certificate; `packages: write` pushes.
+    // Losing either turns the publish into a late, confusing failure.
+    assert.match(workflow, /^\s{2}packages:\s*write\s*$/m);
+    assert.match(workflow, /^\s{2}id-token:\s*write\s*$/m);
+  });
+
+  it('signs a DIGEST, never a floating tag', () => {
+    // A signature over `:latest` says nothing about what `:latest` points at
+    // tomorrow, and the daemon pins by digest precisely so it does not have to
+    // trust one.
+    assert.match(workflow, /cosign sign --yes "\$IMAGE_DIGEST"/);
+    assert.match(workflow, /IMAGE_DIGEST:\s*\$\{\{\s*env\.IMAGE\s*\}\}@\$\{\{\s*steps\.build\.outputs\.digest\s*\}\}/);
   });
 });

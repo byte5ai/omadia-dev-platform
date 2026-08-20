@@ -47,6 +47,28 @@ if (!existsSync(join(pkgRoot, 'dist', 'plugin.js'))) {
   process.exit(1);
 }
 
+/**
+ * The shim is a SEPARATE workspace package that `goldenFixture.e2e.test.ts`
+ * imports by package name (see the `external` list below for why). Node then
+ * resolves it to `packages/runner-shim/dist/src/index.js` — so a repo where the
+ * shim has not been built yet fails that suite with `ERR_MODULE_NOT_FOUND` on a
+ * path nothing in this package mentions.
+ *
+ * The root `build` script builds the shim BEFORE this package for exactly this
+ * reason. Checked here anyway: build order is the kind of thing that gets
+ * reordered by someone fixing an unrelated problem, and this is a far better
+ * message than the one Node gives.
+ */
+const shimEntry = join(pkgRoot, '..', 'runner-shim', 'dist', 'src', 'index.js');
+if (!existsSync(shimEntry)) {
+  console.error(
+    'packages/runner-shim is not built — `goldenFixture.e2e.test.ts` imports it by package name.\n' +
+      'Run `npm run build -w packages/runner-shim` (or `npm run build` from the repo root, which ' +
+      'orders it before this package).',
+  );
+  process.exit(1);
+}
+
 /** Recursive, because `test/_helpers/` sits beside the suites. */
 function walk(dir, acc = []) {
   for (const name of readdirSync(dir)) {
