@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dev Platform</title>
+
+    <!--
+      THE PLUGIN SHIPS NO STYLESHEET.
+
+      `.css` is absent from the plugin-ZIP extension allowlist and from the
+      static router's Content-Type table, deliberately and permanently: that
+      absence is what forces every plugin onto the one sheet core generates
+      from web-ui's own Lume tokens. This single link is the entire styling
+      channel a distributed plugin has, and it is why the SPA follows the
+      operator's active palette and light/dark mode without knowing one hex
+      value. `vite.config.ts` emits no CSS and `scripts/check-ui-vocabulary.mjs`
+      fails the build if that ever stops being true.
+
+      Absolute, not relative: the sheet is served by core at the web-ui origin,
+      not from inside the plugin's `/p/<id>/ui/` bundle. `plugin-ui.css` is the
+      current name; `admin-ui.css` is the frozen alias serving the same bytes
+      for plugin admin UIs written before this contract existed.
+    -->
+    <link rel="stylesheet" href="/bot-api/_harness/plugin-ui.css" />
+
+    <!--
+      NO INLINE BOOTSTRAP SCRIPT HERE, ON PURPOSE.
+
+      The proof fixture in core (`middleware/test/fixtures/plugin-ui-proof/`)
+      mirrors `?theme=&palette=&locale=` onto <html> from an inline <script>.
+      That cannot work for a real bundle: `pluginUiStatic.ts` serves this
+      document with `Content-Security-Policy: … script-src 'self' …`, which
+      has no `'unsafe-inline'` and no hash, so a browser refuses to run an
+      inline script here. Copying the fixture's shape would have produced a UI
+      that renders in the wrong theme with a console error nobody reads.
+
+      So `src/main.tsx` applies the attributes as its first statement instead —
+      before React mounts, and therefore before anything is painted. See
+      `applyAppearanceFromQuery()`.
+    -->
+    <script type="module" src="/src/main.tsx"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

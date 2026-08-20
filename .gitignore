@@ -7,3 +7,7 @@ out/
 .env
 .env.local
 *.log
+
+# packages/ui builds into packages/plugin/ui — build output that happens to
+# live inside a sibling package, and part of the ZIP rather than of the source.
+packages/plugin/ui/
