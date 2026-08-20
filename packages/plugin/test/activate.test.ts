@@ -47,6 +47,8 @@ function makeCtx(over: {
     routes: [],
     navs: 0,
     tools: 0,
+    toolNames: [] as string[],
+    toolSpecs: [] as { name: string; hasHandler: boolean; hasPromptDoc: boolean }[],
     jobs: [],
     status: [],
     logs: [],
@@ -89,11 +91,34 @@ function makeCtx(over: {
       },
     },
     tools: {
-      register: () => {
+      // Faithful to the kernel: `register` and `registerHandler` are two doors
+      // into ONE name-keyed map, and both THROW on a name already present
+      // (harness-orchestrator/src/nativeToolRegistry.ts:148, :198). The previous
+      // stub accepted anything and returned a disposer, which is why it stayed
+      // green while activate() double-registered every tool and died on the
+      // first one against a real core.
+      register: (spec, handler, options) => {
+        if (rec.toolNames.includes(spec.name)) {
+          throw new Error(`NativeToolRegistry: duplicate native-tool name '${spec.name}'`);
+        }
+        rec.toolNames.push(spec.name);
+        rec.toolSpecs.push({
+          name: spec.name,
+          hasHandler: typeof handler === 'function',
+          hasPromptDoc: options?.promptDoc !== undefined,
+        });
         rec.tools += 1;
         return dispose;
       },
-      registerHandler: () => dispose,
+      registerHandler: (name, handler) => {
+        if (rec.toolNames.includes(name)) {
+          throw new Error(`NativeToolRegistry: duplicate native-tool name '${name}'`);
+        }
+        rec.toolNames.push(name);
+        rec.toolSpecs.push({ name, hasHandler: typeof handler === 'function', hasPromptDoc: false });
+        rec.tools += 1;
+        return dispose;
+      },
     },
     uiRoutes: {
       registerNav: () => {
@@ -222,6 +247,30 @@ void describe('activate() registrations', () => {
     });
     const handle = await activate(ctx);
     assert.equal(rec.tools, 3, 'dev_job_start / dev_job_status / dev_job_list');
+    assert.deepEqual(rec.toolNames, ['dev_job_start', 'dev_job_status', 'dev_job_list']);
+    await handle.close();
+  });
+
+  void it('registers each chat tool EXACTLY once, with a handler and a promptDoc', async () => {
+    // P5 acceptance run. activate() called BOTH `ctx.tools.registerHandler(...)`
+    // and `ctx.tools.register(...)` per tool. They are alternative doors into
+    // one name-keyed kernel map and both throw on duplicate, so against a real
+    // core the first tool threw `duplicate native-tool name 'dev_job_start'`,
+    // activate() rolled back, and the plugin served NOTHING while the installed
+    // registry still read `status: active`.
+    //
+    // Three properties, because the count alone would also pass if the plugin
+    // registered three handler-only entries with no spec — which is the other
+    // half of what was wrong (`register(reg.spec)` passed no handler at all).
+    const { ctx, rec } = makeCtx({
+      capabilities: { graphPool: fakePool(), turnContext: { current: () => ({ userId: 'u1' }) } },
+    });
+    const handle = await activate(ctx);
+    assert.equal(new Set(rec.toolNames).size, rec.toolNames.length, 'a name was registered twice');
+    for (const t of rec.toolSpecs) {
+      assert.ok(t.hasHandler, `${t.name} registered without a handler — dispatch would hit undefined`);
+      assert.ok(t.hasPromptDoc, `${t.name} registered without its promptDoc`);
+    }
     await handle.close();
   });
 
@@ -240,7 +289,7 @@ void describe('close() symmetry (#470 B2)', () => {
     });
     const handle = await activate(ctx);
     const registered =
-      rec.routes.length + rec.navs + rec.jobs.length + rec.tools * 2; /* spec + handler */
+      rec.routes.length + rec.navs + rec.jobs.length + rec.tools; /* one register() per tool */
     rec.disposed = 0;
     await handle.close();
     assert.ok(
