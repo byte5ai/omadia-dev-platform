@@ -400,10 +400,26 @@ async function activateInner(
     // PR #536 registered this from `index.ts` behind `DEV_PLATFORM_ENABLED`,
     // deliberately temporary, to prove the loop before any code moved. This is
     // the call it was always going to become; nothing about the shell changes.
+    //
+    // THE HREF MOVED IN P2, and leaving it at the old path would be the
+    // quietest possible way to break this plugin. `/admin/dev-platform` was a
+    // page COMPILED INTO web-ui. P2 ports those pages out of core into
+    // `packages/ui`, so core deletes that route — and a nav entry still aimed
+    // at it renders a sidebar link to the shell's 404, with nothing in any
+    // build to say so. `/plugin-ui/<id>` is the generic host page core added
+    // in C8: it validates the id and iframes
+    // `/p/<id>/ui/index.html?theme=&palette=&locale=`, which is where the
+    // `ui/` directory in this package's ZIP is served from.
+    //
+    // `encodeURIComponent` is load-bearing, not defensive. This plugin's id is
+    // SCOPED — `@omadia/dev-platform`, per `manifest.yaml` and per the charset
+    // `manifestLoader.ts:182` blesses — so it contains a `/`. Interpolated raw
+    // it would emit `/plugin-ui/@omadia/dev-platform`: two path segments, which
+    // neither the Next dynamic segment nor Express's `:pluginId` can match.
     disposers.push(
       ctx.uiRoutes.registerNav({
         navId: 'devPlatform',
-        href: '/admin/dev-platform',
+        href: `/plugin-ui/${encodeURIComponent(DEV_PLATFORM_PLUGIN_ID)}`,
         cluster: 'adminCluster',
         order: 50,
         label: { en: 'Dev Platform', de: 'Dev-Plattform' },

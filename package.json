@@ -12,15 +12,15 @@
   ],
   "//typecheck": "packages/plugin resolves @omadia/dev-platform-plugin-api through its emitted .d.ts, so the API package is BUILT before anything is type-checked. You cannot type-check against declarations that do not exist yet.",
   "scripts": {
-    "build": "npm run build -w packages/plugin-api && npm run build -w packages/plugin && npm run build -w packages/runner-shim",
+    "build": "npm run build -w packages/plugin-api && npm run build -w packages/plugin && npm run build -w packages/ui",
     "typecheck": "npm run build -w packages/plugin-api && npm run typecheck --workspaces --if-present",
-    "test": "npm run test -w packages/plugin && npm run test -w packages/runner-shim && npm run test -w sidecars/dev-runner-daemon",
+    "test": "npm run test -w packages/plugin && npm run test -w packages/ui",
     "package": "npm run package -w packages/plugin",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules",
     "link:core": "node scripts/link-core.mjs",
     "codegen:migrations": "npm run codegen:migrations -w packages/plugin"
   },
-  "//esbuild": "The sibling plugin repos pin ^0.24.0; this one does not. esbuild <=0.24.2 carries GHSA-67mh-4wv8-2f99 (the dev server answers cross-origin requests), and a brand-new public repo should not ship with a known advisory. We only ever call the build() API from scripts/test.mjs \u2014 never serve() \u2014 so the advisory does not reach us either way, but the fix is free.",
+  "//esbuild": "The sibling plugin repos pin ^0.24.0; this one does not. esbuild <=0.24.2 carries GHSA-67mh-4wv8-2f99 (the dev server answers cross-origin requests), and a brand-new public repo should not ship with a known advisory. We only ever call the build() API from scripts/test.mjs — never serve() — so the advisory does not reach us either way, but the fix is free.",
   "devDependencies": {
     "typescript": "^6.0.2",
     "@types/node": "^25.6.0",
@@ -37,5 +37,6 @@
   },
   "allowScripts": {
     "esbuild@0.25.12": true
-  }
+  },
+  "//ui": "packages/ui builds INTO packages/plugin/ui, so it must run after the plugin build and before `package`. build-zip.mjs lists `ui` in REQUIRED_DIRS: a ZIP cut without it installs, activates, adds a nav entry and 404s when the operator clicks it."
 }

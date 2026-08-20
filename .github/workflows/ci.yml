@@ -150,9 +150,55 @@ jobs:
             exit 1
           fi
 
+      # The SPA vocabulary gate.
+      #
+      # `npm run build -w packages/ui` already runs this check — it is the
+      # second half of that package’s `build` script. Running it again,
+      # standalone, catches the one edit the build itself cannot see: a
+      # `vocabulary/classes.txt` widened by hand to turn a red build green.
+      # That passes either way inside the build; here it is the only subject.
+      #
+      # A class outside the served sheet does not error at runtime. It renders
+      # UNSTYLED, on the operator’s screen, and nowhere else.
+      - name: Assert the plugin UI vocabulary
+        working-directory: omadia-dev-platform/packages/ui
+        run: npm run lint:vocabulary
+
       - name: Package
         working-directory: omadia-dev-platform
         run: npm run package -w packages/plugin
+
+      # `ui/` is in build-zip’s REQUIRED_DIRS, so a missing bundle already
+      # fails the step above. This asserts the property that step cannot: that
+      # the archive carries NO stylesheet. `.css` is absent from the plugin-ZIP
+      # extension allowlist, so a ZIP containing one is rejected at ingest —
+      # after upload, by someone else, with a message that does not name this
+      # build. `set -o pipefail` because a `grep` behind a pipe that dies on a
+      # 64 KiB buffer is how this repo’s sibling shipped a dead release
+      # pipeline for months.
+      - name: Assert the ZIP ships a bundle and no stylesheet
+        working-directory: omadia-dev-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Exactly one, not `ls *.zip` — a stale artifact from an earlier
+          # version makes that glob expand to two paths and `unzip` then
+          # reads the second as an archive member filter, which SUCCEEDS while
+          # inspecting nothing. A green step that checked no file is the exact
+          # failure this step exists to prevent.
+          shopt -s nullglob
+          zips=(packages/plugin/out/*.zip)
+          if [ ${#zips[@]} -ne 1 ]; then
+            echo "::error::expected exactly one ZIP, found ${#zips[@]}: ${zips[*]}"
+            exit 1
+          fi
+          zip="${zips[0]}"
+          unzip -l "$zip" > /tmp/zip-list.txt
+          grep -q "ui/index.html" /tmp/zip-list.txt
+          if grep -qE "[.]css$" /tmp/zip-list.txt; then
+            echo "::error::the plugin ZIP contains a stylesheet - plugins ship no CSS"
+            exit 1
+          fi
 
       - name: Upload plugin ZIP
         uses: actions/upload-artifact@v4
