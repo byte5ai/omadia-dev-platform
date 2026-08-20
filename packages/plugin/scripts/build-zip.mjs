@@ -15,7 +15,8 @@
  * Adapted from `omadia-integration-odoo/scripts/build-zip.mjs`. The differences
  * are the workspace layout (this package sits under `packages/plugin`, so the
  * script resolves paths from its own location, not from an assumed CWD) and the
- * `packages/ui` payload, which is not built yet.
+ * `ui/` payload — the compiled operator SPA that `packages/ui` builds into this
+ * package (epic #470 P2).
  *
  * ## It does NOT bundle
  *
@@ -60,9 +61,30 @@ const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * of this script shipped exactly that ZIP.
  */
 const REQUIRED_FILES = ['manifest.yaml'];
-const REQUIRED_DIRS = ['dist', 'migrations'];
+const REQUIRED_DIRS = ['dist', 'migrations', 'ui'];
 const OPTIONAL_FILES = ['README.md', 'LICENSE', 'NOTICE'];
 const OPTIONAL_DIRS = ['assets', 'skills'];
+
+/**
+ * `ui/` is REQUIRED, alongside `dist` and `migrations`, and the reasoning is
+ * the same one that made `migrations/` required after the first cut of this
+ * script shipped without it.
+ *
+ * `activate()` registers a nav entry pointing at `/plugin-ui/<id>`, which core
+ * renders as an iframe onto `/p/<id>/ui/index.html`. A ZIP cut without `ui/`
+ * therefore installs cleanly, activates cleanly, adds a nav entry to the
+ * operator's sidebar — and answers 404 when they click it. Optional would mean
+ * "a build that forgot to run `vite build` ships silently"; required means it
+ * fails here, where the fix is one command.
+ *
+ * The directory is produced by `npm run build -w packages/ui`, which the root
+ * `build` script runs after the plugin's `tsc`. It is gitignored: it is build
+ * output that happens to live inside a sibling package.
+ */
+const UI_DIR = 'ui';
+
+/** The bundle entry. Its absence means `vite build` did not finish. */
+const REQUIRED_IN_UI = ['index.html'];
 
 /** The manifest's `lifecycle.entry`. Its absence means `tsc` did not finish. */
 const REQUIRED_IN_DIST = ['plugin.js'];
@@ -161,6 +183,40 @@ if (readdirSync(join(stageDir, 'migrations')).some((f) => f.endsWith('.sql'))) {
   );
 }
 console.log(`  + migrations/ verified (${stagedMigrations.length} codegen'd + checksums.json)`);
+
+// --- ui/ sanity -----------------------------------------------------------
+// Two properties the archive must have, checked here because both fail
+// SILENTLY at runtime and neither is visible in a directory listing.
+{
+  const uiRoot = join(stageDir, UI_DIR);
+  for (const rel of REQUIRED_IN_UI) {
+    if (!existsSync(join(uiRoot, rel))) {
+      throw new Error(
+        `ui/${rel} is missing — run \`npm run build -w packages/ui\` before packaging`,
+      );
+    }
+  }
+
+  // No stylesheet, ever. `.css` is absent from the ZIP extension allowlist,
+  // so a bundle that emitted one is rejected at ingest with
+  // `zip.forbidden_extension` — after upload, by someone else, with a message
+  // that does not name this build. Catching it here names it.
+  const offenders = [];
+  const scan = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) scan(join(dir, entry.name), rel);
+      else if (entry.name.toLowerCase().endsWith('.css')) offenders.push(rel);
+    }
+  };
+  scan(uiRoot, '');
+  if (offenders.length > 0) {
+    throw new Error(
+      `ui/ contains ${offenders.length} stylesheet(s) — ${offenders.join(', ')}. ` +
+        'Plugins ship no CSS; the bundle links the sheet core serves. See packages/ui/vocabulary/README.md.',
+    );
+  }
+}
 
 // --- package.json, without devDependencies ---------------------------------
 // devDependencies are meaningless inside a published artifact — nothing ever
