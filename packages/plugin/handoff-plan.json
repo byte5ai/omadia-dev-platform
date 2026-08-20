@@ -1,0 +1,43 @@
+{
+  "pluginId": "@omadia/dev-platform",
+  "ledger": "plg_omadia_dev_platform_migrations",
+  "migrationsDir": "migrations",
+  "entries": [
+    {
+      "filename": "0022_dev_platform.js",
+      "witnessSql": "SELECT to_regclass('public.dev_job_artifacts') IS NOT NULL"
+    },
+    {
+      "filename": "0023_dev_platform_pipeline.js",
+      "witnessSql": "SELECT to_regclass('public.dev_github_app_installations') IS NOT NULL"
+    },
+    {
+      "filename": "0024_dev_platform_w3.js",
+      "witnessSql": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'dev_jobs' AND column_name = 'conductor_await_id')"
+    },
+    {
+      "filename": "0025_dev_jobs_source_plugin.js",
+      "witnessSql": "SELECT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'public' AND t.relname = 'dev_jobs' AND c.conname = 'dev_jobs_source_check' AND pg_get_constraintdef(c.oid) LIKE '%''plugin''%')"
+    },
+    {
+      "filename": "0026_dev_job_gate_kind.js",
+      "witnessSql": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'dev_job_gates' AND column_name = 'gate_kind')"
+    },
+    {
+      "filename": "0027_dev_platform_triggers.js",
+      "witnessSql": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'dev_jobs' AND column_name = 'usage_estimated')"
+    },
+    {
+      "filename": "0028_dev_jobs_webhook_one_active.js",
+      "witnessSql": "SELECT to_regclass('public.dev_jobs_webhook_one_active') IS NOT NULL"
+    },
+    {
+      "filename": "0029_dev_platform_retention.js",
+      "witnessSql": "SELECT to_regclass('public.dev_jobs_terminal_ended_idx') IS NOT NULL"
+    },
+    {
+      "filename": "0030_dev_job_events_truncated_marker.js",
+      "witnessSql": "SELECT to_regclass('public.dev_job_events_truncated_once_idx') IS NOT NULL"
+    }
+  ]
+}
