@@ -59,8 +59,16 @@ const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * is the right call, and it means a ZIP cut without this directory installs and
  * then fails at activation with the plugin's nine tables absent. The first cut
  * of this script shipped exactly that ZIP.
+ *
+ * `handoff-plan.json` is REQUIRED for a narrower but similar reason (epic #470
+ * C11). `activate()` performs the ledger handoff unconditionally; the plan file
+ * is how an operator DRY-RUNS that handoff against production first, with
+ * core's `middleware/scripts/plugin-ledger-handoff.mjs`. A ZIP without it
+ * installs perfectly and quietly removes the only step that de-risks the
+ * upgrade. `ledgerHandoff.test.ts` proves the file agrees with the code, so a
+ * missing one here is a packaging bug, not a choice.
  */
-const REQUIRED_FILES = ['manifest.yaml'];
+const REQUIRED_FILES = ['manifest.yaml', 'handoff-plan.json'];
 const REQUIRED_DIRS = ['dist', 'migrations', 'ui'];
 const OPTIONAL_FILES = ['README.md', 'LICENSE', 'NOTICE'];
 const OPTIONAL_DIRS = ['assets', 'skills'];

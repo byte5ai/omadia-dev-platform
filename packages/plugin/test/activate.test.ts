@@ -24,6 +24,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import { activate, type DevPlatformPluginContext } from '../src/plugin.js';
+import { SEED_LEDGER_ENTRIES } from '../src/ledgerHandoff.js';
 
 interface Recorded {
   routes: Array<{ prefix: string; auth?: string; body?: string }>;
@@ -34,6 +35,9 @@ interface Recorded {
   logs: string[];
   disposed: number;
   migrationsRun: number;
+  /** C11: the order matters — a seed after the apply loop would be a no-op. */
+  order: string[];
+  seedCalls: Array<{ entries: readonly { filename: string }[]; dryRun?: boolean }>;
 }
 
 function makeCtx(over: {
@@ -42,6 +46,10 @@ function makeCtx(over: {
   noPool?: boolean;
   noSql?: boolean;
   readOnlySecrets?: boolean;
+  /** Simulate a core older than plugin-api 1.3.0: no `seedLedger` at all. */
+  noSeedLedger?: boolean;
+  /** Files the seed declined because their witness was false. */
+  skippedNoWitness?: readonly string[];
 }): { ctx: DevPlatformPluginContext; rec: Recorded } {
   const rec: Recorded = {
     routes: [],
@@ -54,6 +62,8 @@ function makeCtx(over: {
     logs: [],
     disposed: 0,
     migrationsRun: 0,
+    order: [],
+    seedCalls: [],
   };
   const dispose = () => {
     rec.disposed += 1;
@@ -80,8 +90,38 @@ function makeCtx(over: {
             ledger: 'plg_omadia_dev_platform_migrations',
             runMigrations: async () => {
               rec.migrationsRun += 1;
+              rec.order.push('runMigrations');
               return { applied: [], skipped: [], ledger: 'plg_omadia_dev_platform_migrations', durationMs: 1 };
             },
+            ...(over.noSeedLedger
+              ? {}
+              : {
+                  seedLedger: async (opts: {
+                    entries: readonly { filename: string; witnessSql: string }[];
+                    dryRun?: boolean;
+                  }) => {
+                    rec.order.push('seedLedger');
+                    rec.seedCalls.push({
+                      entries: opts.entries,
+                      ...(opts.dryRun === undefined ? {} : { dryRun: opts.dryRun }),
+                    });
+                    const declined = over.skippedNoWitness ?? [];
+                    const seeded = opts.entries
+                      .map((e) => e.filename)
+                      .filter((f) => !declined.includes(f));
+                    return {
+                      seeded,
+                      applied: declined,
+                      skippedNoWitness: declined,
+                      alreadySeeded: [],
+                      donorRecorded: opts.entries.map((e) => e.filename),
+                      ledger: 'plg_omadia_dev_platform_migrations',
+                      donorLedger: '_multi_orchestrator_migrations',
+                      dryRun: opts.dryRun ?? false,
+                      durationMs: 1,
+                    };
+                  },
+                }),
           },
         }),
     routes: {
@@ -313,5 +353,65 @@ void describe('close() symmetry (#470 B2)', () => {
     assert.ok(rec.routes.length > 0, 'the test is meaningless if nothing was registered before the throw');
     assert.ok(rec.disposed >= rec.routes.length, 'a partial activation must not leave routes mounted');
     assert.deepEqual(rec.status.map((s) => s.status), ['error']);
+  });
+});
+
+// ── C11: the migration handoff ───────────────────────────────────────────────
+
+describe('#470 C11 — activate() adopts core\'s ledger before applying', () => {
+  void it('seeds the ledger BEFORE running migrations, with every shipped witness', async () => {
+    const { ctx, rec } = makeCtx({});
+    const handle = await activate(ctx);
+    await handle.close();
+
+    assert.deepEqual(
+      rec.order,
+      ['seedLedger', 'runMigrations'],
+      'a seed after the apply loop is a no-op — the files would already be in the ledger',
+    );
+    assert.equal(rec.seedCalls.length, 1, 'exactly one handoff per activation');
+    assert.deepEqual(
+      rec.seedCalls[0]?.entries.map((e) => e.filename),
+      SEED_LEDGER_ENTRIES.map((e) => e.filename),
+    );
+    assert.equal(
+      rec.seedCalls[0]?.dryRun,
+      undefined,
+      'activation performs the real handoff; dryRun is the operator CLI\'s job',
+    );
+  });
+
+  void it('still activates against a core that has no seedLedger, and says so', async () => {
+    // A core older than plugin-api 1.3.0. Declaring the method required would
+    // make this plugin refuse to activate on a core that can in fact run it.
+    const { ctx, rec } = makeCtx({ noSeedLedger: true });
+    const handle = await activate(ctx);
+    await handle.close();
+
+    assert.deepEqual(rec.order, ['runMigrations'], 'the apply loop still runs');
+    assert.equal(rec.seedCalls.length, 0);
+    assert.ok(
+      rec.logs.some((l) => l.includes('predates `ctx.sql.seedLedger`')),
+      'the degradation must be visible in the activation log, not silent',
+    );
+  });
+
+  void it('warns loudly when core recorded migrations whose schema is absent', async () => {
+    // Rows present, tables absent: a restore from an older snapshot, a
+    // rolled-back deploy, or a manual drop. The seed declines, the apply loop
+    // repairs — so this is a WARNING, not a refusal.
+    const declined = ['0028_dev_jobs_webhook_one_active.js'];
+    const { ctx, rec } = makeCtx({ skippedNoWitness: declined });
+    const handle = await activate(ctx);
+    await handle.close();
+
+    const warning = rec.logs.find((l) => l.includes('WARNING'));
+    assert.ok(warning, 'a silent disagreement is the failure mode C11 exists to prevent');
+    assert.ok(warning.includes(declined[0] as string), 'name the files');
+    assert.ok(
+      warning.includes('idempotent'),
+      'and say why activation continues anyway',
+    );
+    assert.equal(rec.migrationsRun, 1, 'the apply loop is the repair');
   });
 });

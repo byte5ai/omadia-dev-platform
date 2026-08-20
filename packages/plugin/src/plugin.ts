@@ -52,6 +52,7 @@ import { mintRunnerToken } from './jobToken.js';
 import { DevRetentionRunner } from './retention.js';
 import { buildDevPlatformConfig, isTrackerPollingEnabled } from './pluginConfig.js';
 import { secretVaultFromContext } from './host/vault.js';
+import { SEED_LEDGER_ENTRIES } from './ledgerHandoff.js';
 import { installAppJwtMinter, type GithubAppJwtMinter } from './host/githubAppJwt.js';
 import { installUsageRecorder, droppedUsageRows, type UsageRecorder } from './host/usageTelemetry.js';
 
@@ -131,6 +132,30 @@ export interface DevPlatformPluginContext {
       applied: readonly string[];
       skipped: readonly string[];
       ledger: string;
+      durationMs: number;
+    }>;
+    /**
+     * OPTIONAL, and the optionality is the version guard.
+     *
+     * Added in `@omadia/plugin-api` 1.3.0 (epic #470 C11). A core that predates
+     * it simply does not have the method, and the correct behaviour there is to
+     * let `runMigrations()` apply the nine idempotent files — slower on an
+     * upgrade, never wrong. Declaring it required would make this plugin
+     * refuse to activate on a core that can in fact run it.
+     */
+    seedLedger?(opts: {
+      entries: readonly { filename: string; witnessSql: string }[];
+      dryRun?: boolean;
+      dir?: string;
+    }): Promise<{
+      seeded: readonly string[];
+      applied: readonly string[];
+      skippedNoWitness: readonly string[];
+      alreadySeeded: readonly string[];
+      donorRecorded: readonly string[];
+      ledger: string;
+      donorLedger: string;
+      dryRun: boolean;
       durationMs: number;
     }>;
   };
@@ -292,6 +317,40 @@ async function activateInner(
     // BY FILENAME with per-file schema witnesses, so an installation that
     // already has these tables reports them `skipped` rather than re-running
     // them — and all nine are idempotent even if it does.
+    // C11 — adopt what core already applied, on proof rather than on trust.
+    // Guarded: `seedLedger` is optional on the contract, so a core older than
+    // plugin-api 1.3.0 falls through to the (idempotent) apply loop instead of
+    // failing to activate.
+    if (ctx.sql.seedLedger) {
+      const handoff = await ctx.sql.seedLedger({ entries: SEED_LEDGER_ENTRIES });
+      log(
+        `[dev-platform] ledger handoff: ${String(handoff.seeded.length)} adopted from ` +
+          `'${handoff.donorLedger}', ${String(handoff.alreadySeeded.length)} already in ` +
+          `'${handoff.ledger}', ${String(handoff.applied.length)} left to apply` +
+          (handoff.seeded.length > 0 ? ` — adopted: ${handoff.seeded.join(', ')}` : ''),
+      );
+      if (handoff.skippedNoWitness.length > 0) {
+        // The alarm. Core's ledger says these ran; the live catalog says their
+        // schema objects are not there. That is a restore, a rolled-back
+        // deploy, or a manual drop — and the naive handoff would have adopted
+        // them and left every request against those tables 500ing. The apply
+        // loop below is the repair, so this is a WARNING and not a refusal.
+        log(
+          `[dev-platform] WARNING — core's ledger records ${String(handoff.skippedNoWitness.length)} migration(s) ` +
+            `whose schema is NOT present: ${handoff.skippedNoWitness.join(', ')}. ` +
+            'This database was most likely restored from a snapshot older than those migrations, or the ' +
+            'objects were dropped. They are being re-applied now (all nine are idempotent). If that is a ' +
+            'surprise, stop and confirm this is the database you think it is.',
+        );
+      }
+    } else {
+      log(
+        '[dev-platform] this core predates `ctx.sql.seedLedger` (plugin-api 1.3.0) — ' +
+          'the nine migrations will be re-applied instead of adopted. They are idempotent, so this is ' +
+          'slower on an existing installation, not unsafe.',
+      );
+    }
+
     const report = await ctx.sql.runMigrations();
     log(
       `[dev-platform] migrations: ${String(report.applied.length)} applied, ` +
