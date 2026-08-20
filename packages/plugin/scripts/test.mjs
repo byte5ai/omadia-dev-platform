@@ -47,6 +47,28 @@ if (!existsSync(join(pkgRoot, 'dist', 'plugin.js'))) {
   process.exit(1);
 }
 
+/**
+ * The shim is a SEPARATE workspace package that `goldenFixture.e2e.test.ts`
+ * imports by package name (see the `external` list below for why). Node then
+ * resolves it to `packages/runner-shim/dist/src/index.js` — so a repo where the
+ * shim has not been built yet fails that suite with `ERR_MODULE_NOT_FOUND` on a
+ * path nothing in this package mentions.
+ *
+ * The root `build` script builds the shim BEFORE this package for exactly this
+ * reason. Checked here anyway: build order is the kind of thing that gets
+ * reordered by someone fixing an unrelated problem, and this is a far better
+ * message than the one Node gives.
+ */
+const shimEntry = join(pkgRoot, '..', 'runner-shim', 'dist', 'src', 'index.js');
+if (!existsSync(shimEntry)) {
+  console.error(
+    'packages/runner-shim is not built — `goldenFixture.e2e.test.ts` imports it by package name.\n' +
+      'Run `npm run build -w packages/runner-shim` (or `npm run build` from the repo root, which ' +
+      'orders it before this package).',
+  );
+  process.exit(1);
+}
+
 /** Recursive, because `test/_helpers/` sits beside the suites. */
 function walk(dir, acc = []) {
   for (const name of readdirSync(dir)) {
@@ -81,7 +103,34 @@ await build({
   logLevel: 'error',
   // Host-provided at runtime. See the header — a second copy of `pg` breaks
   // `instanceof` in ways that look like logic bugs.
-  external: ['@omadia/plugin-api', '@omadia/dev-platform-plugin-api', 'express', 'pg', 'zod'],
+  //
+  // `yaml` is external for a DIFFERENT reason: it is a test-only devDependency,
+  // it is CommonJS, and bundling it into an ESM output turns its internal
+  // `require()` calls into esbuild's "Dynamic require of X is not supported"
+  // shim — which throws at import time, before a single assertion runs.
+  // Resolved from node_modules at runtime instead (the runner sets cwd to the
+  // package root). Only `composeTopology.test.ts` uses it.
+  //
+  // `@omadia/dev-runner-shim` MUST stay external too, and for a third reason
+  // again: `src/index.ts` ends in
+  //   `if (process.argv[1] && import.meta.url === \`file://${process.argv[1]}\`)`
+  // — the guard that lets the same file be both the image entrypoint and an
+  // importable module. Bundle it into a suite and `import.meta.url` becomes the
+  // BUNDLE's path, which is also `process.argv[1]` under `node --test`. The
+  // guard then fires at import time and the shim runs itself, reading a real
+  // runner's environment out of the test process ("missing required env
+  // OMADIA_JOB_BASE_URL", before a single assertion). External keeps it a
+  // separate module with its own identity, so the guard stays quiet.
+  // `goldenFixture.e2e.test.ts` therefore imports it BY PACKAGE NAME.
+  external: [
+    '@omadia/plugin-api',
+    '@omadia/dev-platform-plugin-api',
+    '@omadia/dev-runner-shim',
+    'express',
+    'pg',
+    'zod',
+    'yaml',
+  ],
 });
 
 const built = walk(outDir, []).length ? [] : [];

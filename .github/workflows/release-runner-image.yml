@@ -1,0 +1,210 @@
+name: release-runner-image
+
+# Publishes `ghcr.io/byte5ai/omadia-dev-runner` from THIS repository, signed
+# keylessly with cosign and carrying an SPDX SBOM attestation.
+#
+# ## Why the triggers are what they are
+#
+# Tag pushes and manual dispatch only — deliberately NOT `on: push` to a branch.
+#
+# Cross-org GHCR package write cannot be verified without actually pushing, and
+# this repository has never pushed to `ghcr.io/byte5ai/omadia-dev-runner` before:
+# the package exists and is owned by byte5ai/omadia, which published it until
+# now. GitHub scopes a package to the repository that created it, so the first
+# push from here needs the package's admin settings to grant this repository
+# write access (Package settings → Manage Actions access → add
+# byte5ai/omadia-dev-platform with the `write` role). Until someone does that,
+# the push step 403s.
+#
+# So the workflow is written to be RUN ON PURPOSE, by a person who can read the
+# result, rather than to fire on every merge and turn a permissions gap into
+# permanent red CI. `dry_run` publishes nothing and exercises the build, which is
+# the cheapest way to find out whether the rest of the pipeline works.
+#
+# ## Verify side
+#
+# The daemon runs `cosign verify` against this image at boot
+# (`sidecars/dev-runner-daemon/src/imageVerify.mjs`). Because the signer moved
+# from byte5ai/omadia to this repository, the certificate identity CHANGED — see
+# docs/SUPPLY_CHAIN.md for the transition regexp that accepts both, and for the
+# narrowing step that removes the old one a release later.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to stamp, e.g. v0.3.0 (empty = edge build, :edge + :sha-<short>)'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Build only — do not push, sign or attest. Use this to prove the pipeline before GHCR access is granted.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # Push to ghcr.io/byte5ai/*. This is the ceiling the job can ask for; the
+  # PACKAGE must also grant this repository write access (see above) — a
+  # `packages: write` token is necessary and not sufficient for a package another
+  # repository owns.
+  packages: write
+  # Keyless cosign mints its certificate from the workflow's ambient GitHub OIDC
+  # token. No key material anywhere; the identity IS the workflow ref.
+  id-token: write
+
+env:
+  IMAGE: ghcr.io/byte5ai/omadia-dev-runner
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve build mode
+        id: mode
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # A tag push carries its version in the ref; a dispatch carries it in
+          # an input. Derive one value so nothing downstream has to know which
+          # trigger fired.
+          if [ -n "${INPUT_VERSION}" ]; then
+            version="${INPUT_VERSION}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version=""
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Building ${version:-edge}; push=$([ "${DRY_RUN}" = "true" ] && echo false || echo true)"
+
+      - name: Compute tags
+        id: tags
+        env:
+          VERSION: ${{ steps.mode.outputs.version }}
+        run: |
+          set -euo pipefail
+          short="$(git rev-parse --short HEAD)"
+          if [ -n "${VERSION}" ]; then
+            # Strip a leading v for the bare-number tags, and keep both spellings
+            # the way core's publish-images.yml does, so an operator's pin does
+            # not have to change shape along with the publisher.
+            bare="${VERSION#v}"
+            minor="$(echo "${bare}" | cut -d. -f1-2)"
+            # `:sha-<gitsha>` on the RELEASE build too: the daemon pins the launch
+            # image by digest, and an immutable tag is what makes that digest
+            # findable again later.
+            tags="${IMAGE}:${bare},${IMAGE}:v${bare},${IMAGE}:${minor},${IMAGE}:v${minor},${IMAGE}:latest,${IMAGE}:sha-${short}"
+          else
+            tags="${IMAGE}:edge,${IMAGE}:sha-${short}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "${tags}"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Repo-root context: the Dockerfile compiles `packages/runner-shim` in a
+      # build stage rather than shipping a second copy of its source.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./sidecars/dev-runner/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.mode.outputs.push == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Supply chain ────────────────────────────────────────────────────────
+      # Only on a real publish. The subject is the immutable DIGEST build-push
+      # emitted, never a floating tag — a signature over `:latest` says nothing
+      # about what `:latest` points at tomorrow.
+      - name: Install cosign
+        if: steps.mode.outputs.push == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Generate SBOM (syft → SPDX-JSON)
+        if: steps.mode.outputs.push == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Sign and attest (keyless, digest-pinned)
+        if: steps.mode.outputs.push == 'true'
+        env:
+          # cosign reads COSIGN_YES to skip the interactive transparency-log
+          # confirmation in CI (equivalent to `--yes`).
+          COSIGN_YES: 'true'
+          IMAGE_DIGEST: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Fulcio issues a short-lived certificate bound to this workflow's ref;
+          # Rekor logs it. Nothing is stored. The daemon pins the resulting
+          # identity at verify time — see docs/SUPPLY_CHAIN.md.
+          cosign sign --yes "$IMAGE_DIGEST"
+          cosign attest --yes --predicate sbom.spdx.json --type spdxjson "$IMAGE_DIGEST"
+
+      - name: Verify the signature we just made
+        if: steps.mode.outputs.push == 'true'
+        env:
+          IMAGE_DIGEST: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Verify with the SAME transition regexp the daemon ships as its
+          # default. A signature that the consumer would reject is not a
+          # signature — and this is the only place that can be discovered before
+          # an operator's daemon refuses to boot on it.
+          #
+          # Kept BYTE-IDENTICAL to DEFAULT_TRANSITION_IDENTITY_REGEXP in
+          # sidecars/dev-runner-daemon/src/imageVerify.mjs. The daemon suite pins
+          # that constant; this is the other end of the same contract.
+          IDENTITY_RE='^(?:https://github\.com/byte5ai/omadia/\.github/workflows/publish-images\.yml|https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml)@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$'
+          cosign verify \
+            --certificate-identity-regexp "$IDENTITY_RE" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE_DIGEST"
+          echo "✓ the published image verifies under the transition regexp the daemon enforces"
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+          PUSHED: ${{ steps.mode.outputs.push }}
+        run: |
+          {
+            echo "### dev-runner image"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| pushed | \`${PUSHED}\` |"
+            echo "| digest | \`${DIGEST:-—}\` |"
+            echo "| tags | \`${TAGS}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

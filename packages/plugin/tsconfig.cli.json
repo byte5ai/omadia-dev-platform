@@ -1,0 +1,18 @@
+{
+  // Typecheck-only project for the operator CLI.
+  //
+  // `tsconfig.json` has `rootDir: "src"` and excludes everything else, so
+  // `scripts/dev-transcript.ts` was invisible to `npm run typecheck` — it
+  // imports three modules out of `src/` and nothing would have told us when one
+  // of them changed shape. That is the same "declared but never run" gap the
+  // daemon's own typecheck turned out to have (epic #470 P4).
+  //
+  // Emits nothing: `scripts/build-cli.mjs` produces the runnable artifact.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.ts", "src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test", ".test-build"]
+}

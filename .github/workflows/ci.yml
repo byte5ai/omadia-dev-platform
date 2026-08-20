@@ -200,6 +200,52 @@ jobs:
             exit 1
           fi
 
+      # These two are the OTHER direction from every check above: the archive
+      # must not GAIN things. A staging script grows by accident, and nothing
+      # else in this repo would notice.
+      - name: Assert the ZIP ships no runner shim and no sidecar
+        working-directory: omadia-dev-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The shim is the code that drives an agent over a repository. On every
+          # production backend it reaches the job baked into the dev-runner
+          # IMAGE — signed, attested, digest-pinned (docs/SUPPLY_CHAIN.md). A
+          # second copy inside the plugin ZIP would be a parallel provenance path
+          # for exactly that code, verified by nothing: the hub checks no
+          # signature and the ZIP carries no attestation.
+          shopt -s nullglob
+          zips=(packages/plugin/out/*.zip)
+          if [ ${#zips[@]} -ne 1 ]; then
+            echo "::error::expected exactly one ZIP, found ${#zips[@]}: ${zips[*]}"
+            exit 1
+          fi
+          unzip -l "${zips[0]}" > /tmp/zip-list2.txt
+          if grep -qE "(^|/)(shim|runner-shim)/" /tmp/zip-list2.txt; then
+            echo "::error::the plugin ZIP contains a runner shim - see docs/SUPPLY_CHAIN.md"
+            exit 1
+          fi
+          if grep -qE "(Dockerfile|docker-compose|(^|/)sidecars/)" /tmp/zip-list2.txt; then
+            echo "::error::the plugin ZIP contains a deployment artifact (Dockerfile/compose/sidecar)"
+            exit 1
+          fi
+
+      # `packagedArtifact.test.ts` reads the STAGE directory `npm run package`
+      # produces, so it can only run after it — during the main `npm test` there
+      # is nothing staged and it skips by design. Run it here, where the artifact
+      # exists, and assert it did not skip.
+      - name: Assert the packaged-artifact suite ran against a real stage
+        working-directory: omadia-dev-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test -w packages/plugin -- packagedArtifact 2>&1 | tee /tmp/pkg-artifact.log
+          grep -qE '^# pass [1-9]' /tmp/pkg-artifact.log
+          if grep -qi 'no staged archive for this package version' /tmp/pkg-artifact.log; then
+            echo "::error::packagedArtifact skipped - the staged archive was not found"
+            exit 1
+          fi
+
       - name: Upload plugin ZIP
         uses: actions/upload-artifact@v4
         with:
