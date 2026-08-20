@@ -1,0 +1,115 @@
+schema_version: "1"
+
+# ---------------------------------------------------------------------------
+# The hub reads THIS file, not package.json. `identity.version` and the
+# package.json `version` must agree — `npm run package` aborts on drift.
+# ---------------------------------------------------------------------------
+
+identity:
+  id: "@omadia/dev-platform"
+  name: "Dev Platform"
+  # kind: "extension" — deliberate. The runtime that resolves capabilities and
+  # activates plugins accepts exactly `tool`, `extension` and `integration`
+  # (middleware/src/plugins/toolPluginRuntime.ts:163-168); the registry accepts
+  # those plus `agent` and `channel` (src/plugins/registryClient.ts:34-40).
+  # `integration` is wrong here: the agent-builder's reference catalog treats
+  # `kind === 'integration'` as "an external system an agent may read from"
+  # (src/plugins/builder/builderReferenceCatalog.ts:116), and the dev platform
+  # is not an external data source — it extends the host with routes, tools and
+  # its own schema. `tool` understates a plugin that owns migrations and HTTP
+  # surfaces. `extension` is also what the epic's own architecture decision
+  # settled on (specs/470-dev-platform-plugin/plan.md §4.1). There is no
+  # "platform" kind.
+  kind: "extension"
+  version: "0.1.0"
+  domain: "dev-platform"
+  description: "The Omadia Dev Platform — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470). This release is the P0 scaffold: it activates and deactivates cleanly and contributes nothing yet."
+  authors:
+    - name: "byte5 GmbH"
+      email: "info@omadia.ai"
+      url: "https://omadia.ai"
+  license: "MIT"
+  categories:
+    - "extension"
+    - "developer-tools"
+
+compat:
+  core: ">=1.0 <2.0"
+  node: ">=20"
+
+lifecycle:
+  entry: "dist/plugin.js"
+
+# ---------------------------------------------------------------------------
+# permissions — DOCUMENTED, NOT DECLARED.
+#
+# Everything below is commented out on purpose. Unknown manifest keys are
+# silently IGNORED by the current core loader, not rejected
+# (specs/470-dev-platform-plugin/implementation.md §2.5). A plugin that declares
+# a future field against an unpatched core therefore activates with no grant and
+# no error — the worst possible failure shape. So these stay comments until the
+# capability that reads them has actually shipped, and each is uncommented in
+# the same PR that lands its enforcement.
+#
+# permissions:
+#   # Gates the EXISTING `graphPool@1` capability so the plugin may own tables
+#   # and run its own migrations (#470 C7 / G4). Do NOT invent a `pgPool`
+#   # capability name — `graphPool@1` is the established one.
+#   # Ships with: shared `runPluginMigrations` + advisory lock + ledger-name
+#   # validation + a MigrationReport.
+#   sql: true
+#
+#   # Manifest-declared, operator-consented public-path grants with exclusive
+#   # prefix ownership (#470 C4 / H1). The dev runner phones home unauthenticated
+#   # to its own prefix; today that is covered by two STATIC exemptions in core,
+#   # which are removed only in C12, after this grant is proven on staging.
+#   public_paths:
+#     - "/bot-api/dev-runner"
+#     - "/bot-api/dev-webhooks"
+# ---------------------------------------------------------------------------
+
+setup:
+  guide:
+    en: |
+      ## Dev Platform — scaffold release
+
+      This build installs and activates, and does nothing else. It is the
+      groundwork release of epic #470, which moves the Dev Platform out of
+      omadia core into this plugin. Its purpose is to prove the packaging and
+      install path while the artifact is still empty and a mistake is cheap.
+
+      **There is nothing to configure yet.** No fields, no credentials, no
+      routes, no database changes.
+
+      The real setup guide arrives with the payload:
+
+      - **P2** — the Dev Platform UI.
+      - **P3** — dev jobs, runners, routes and the plugin's own migrations.
+        This is where connection settings, runner backend selection and budget
+        limits will be configured.
+      - **P4** — the runner sidecar images and their supply chain.
+
+      Until then, installing this plugin is safe and reversible: uninstalling it
+      leaves no tables, no routes and no scheduled work behind.
+    de: |
+      ## Dev Platform — Grundgerüst-Release
+
+      Dieses Build installiert und aktiviert sich, und sonst nichts. Es ist das
+      Fundament-Release von Epic #470, das die Dev Platform aus dem omadia-Kern
+      in dieses Plugin verlagert. Der Zweck: den Verpackungs- und Installations-
+      weg beweisen, solange das Artefakt noch leer und ein Fehler billig ist.
+
+      **Es gibt noch nichts zu konfigurieren.** Keine Felder, keine Zugangs-
+      daten, keine Routen, keine Datenbank-Änderungen.
+
+      Die echte Setup-Anleitung kommt mit der Fracht:
+
+      - **P2** — die Dev-Platform-Oberfläche.
+      - **P3** — Dev Jobs, Runner, Routen und die eigenen Migrationen des
+        Plugins. Dort werden Verbindungseinstellungen, Runner-Backend und
+        Budget-Limits konfiguriert.
+      - **P4** — die Runner-Sidecar-Images und ihre Supply Chain.
+
+      Bis dahin ist die Installation gefahrlos und umkehrbar: Beim Deinstallieren
+      bleiben keine Tabellen, Routen oder geplanten Jobs zurück.
+  fields: []

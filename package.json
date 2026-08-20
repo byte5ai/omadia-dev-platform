@@ -1,0 +1,37 @@
+{
+  "name": "omadia-dev-platform",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Omadia Dev Platform, extracted from omadia core as an installable plugin (epic byte5ai/omadia#470).",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "//typecheck": "packages/plugin resolves @omadia/dev-platform-plugin-api through its emitted .d.ts, so the API package is BUILT before anything is type-checked. You cannot type-check against declarations that do not exist yet.",
+  "scripts": {
+    "build": "npm run build -w packages/plugin-api && npm run build -w packages/plugin",
+    "typecheck": "npm run build -w packages/plugin-api && npm run typecheck --workspaces --if-present",
+    "test": "npm run test -w packages/plugin",
+    "package": "npm run package -w packages/plugin",
+    "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
+  },
+  "//esbuild": "The sibling plugin repos pin ^0.24.0; this one does not. esbuild <=0.24.2 carries GHSA-67mh-4wv8-2f99 (the dev server answers cross-origin requests), and a brand-new public repo should not ship with a known advisory. We only ever call the build() API from scripts/test.mjs — never serve() — so the advisory does not reach us either way, but the fix is free.",
+  "devDependencies": {
+    "typescript": "^6.0.2",
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.25.0",
+    "@omadia/plugin-api": "file:../odoo-bot/middleware/packages/plugin-api"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/byte5ai/omadia-dev-platform",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/byte5ai/omadia-dev-platform.git"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}

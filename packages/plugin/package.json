@@ -1,0 +1,42 @@
+{
+  "name": "@omadia/dev-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/plugin.js",
+  "types": "dist/plugin.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "package": "node scripts/build-zip.mjs",
+    "clean": "rm -rf dist out .test-build *.tsbuildinfo"
+  },
+  "peerDependencies": {
+    "@omadia/dev-platform-plugin-api": "*",
+    "@omadia/plugin-api": "*"
+  },
+  "devDependencies": {
+    "@omadia/dev-platform-plugin-api": "*"
+  },
+  "description": "The Omadia Dev Platform as an installable plugin — dev jobs, runner orchestration, its own routes, tools and migrations. Extracted from omadia core per epic byte5ai/omadia#470. Scaffold only: the middleware tree lands in P3, the SPA in P2.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/byte5ai/omadia-dev-platform",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/byte5ai/omadia-dev-platform.git",
+    "directory": "packages/plugin"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@omadia/dev-platform-plugin-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "description": "Types-only public DevJob* contract for the Omadia Dev Platform plugin. Consumers of dev-platform depend on this instead of on omadia core (epic byte5ai/omadia#470, G8).",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/byte5ai/omadia-dev-platform",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/byte5ai/omadia-dev-platform.git",
+    "directory": "packages/plugin-api"
+  }
+}

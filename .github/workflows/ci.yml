@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# The `file:../odoo-bot/middleware/packages/plugin-api` dependency needs omadia
+# core NEXT TO this repo. actions/checkout can only write inside the workspace,
+# so BOTH repos are checked out into subdirectories of it and every step that
+# touches this repo sets `working-directory`. Checking this repo out at the
+# workspace root instead would put `../odoo-bot` outside the workspace, where
+# checkout cannot place it.
+env:
+  SELF: omadia-dev-platform
+  CORE: odoo-bot
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout omadia-dev-platform
+        uses: actions/checkout@v4
+        with:
+          path: omadia-dev-platform
+
+      # byte5ai/omadia is public, so the default GITHUB_TOKEN can read it.
+      # Only plugin-api is ever built from this checkout — the rest of core is
+      # not installed, not built and not tested here.
+      - name: Checkout omadia core (sibling — provides @omadia/plugin-api)
+        uses: actions/checkout@v4
+        with:
+          repository: byte5ai/omadia
+          path: odoo-bot
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # `middleware/packages/plugin-api/dist/` is gitignored in core, and this
+      # repo's tsconfig resolves the package through its emitted .d.ts — so the
+      # sibling has to be built, not merely present. It has no dependencies of
+      # its own: typescript + @types/node are the whole toolchain, which is why
+      # core's middleware is never installed here.
+      - name: Build @omadia/plugin-api from the sibling checkout
+        working-directory: odoo-bot/middleware/packages/plugin-api
+        run: |
+          npm install --ignore-scripts --no-save --no-package-lock \
+            typescript@^6.0.2 @types/node@^25.6.0
+          npx tsc
+          test -f dist/index.d.ts
+
+      - name: Install
+        working-directory: omadia-dev-platform
+        run: npm install
+
+      - name: Typecheck
+        working-directory: omadia-dev-platform
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: omadia-dev-platform
+        run: npm run build
+
+      - name: Test
+        working-directory: omadia-dev-platform
+        run: npm test
+
+      - name: Package
+        working-directory: omadia-dev-platform
+        run: npm run package -w packages/plugin
+
+      - name: Upload plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: omadia-dev-platform-zip
+          path: omadia-dev-platform/packages/plugin/out/*.zip
+          if-no-files-found: error
