@@ -118,6 +118,34 @@ void describe('the plugin ZIP', { skip: !stage }, () => {
     assert.deepEqual(entries.filter((e) => /(^|\/)bin(\/|$)/.test(e)), []);
   });
 
+  void it('ships NO sourcemaps, in dist/ or in ui/', () => {
+    // Found by the P5 acceptance run against the 0.2.0 artifact, which carried
+    // `ui/assets/index-*.js.map` at 1,196,047 bytes — 80% of the uncompressed
+    // payload and 284 KB of the 965 KB archive.
+    //
+    // Nothing downstream catches this. `.map` IS in core's ZIP extension
+    // allowlist (middleware/src/plugins/zipExtractor.ts:28), so ingest accepts
+    // it silently — unlike `.css`, whose absence from that allowlist is what
+    // makes the stylesheet guard above self-enforcing. This assertion is the
+    // only thing standing between the build and a published archive that
+    // republishes the plugin's TypeScript source into every installation.
+    const maps = entries.filter((e) => e.toLowerCase().endsWith('.map'));
+    assert.deepEqual(
+      maps,
+      [],
+      `the ZIP ships ${maps.length} sourcemap(s): ${maps.join(', ')}`,
+    );
+  });
+
+  void it('still ships the bundle those sourcemaps would have mapped', () => {
+    // Inverse guard for the assertion above. Deleting `ui/` entirely also
+    // yields zero `.map` entries, and would pass it.
+    assert.ok(
+      entries.some((e) => /^ui\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(e)),
+      'the hashed UI bundle is absent — the no-sourcemap assertion is vacuous',
+    );
+  });
+
   void it('still ships the four things the kernel does need', () => {
     // The inverse guard. A test that only ever asserts absence passes on an
     // empty archive.
