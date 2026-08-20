@@ -21,9 +21,9 @@ identity:
   # settled on (specs/470-dev-platform-plugin/plan.md §4.1). There is no
   # "platform" kind.
   kind: "extension"
-  version: "0.1.0"
+  version: "0.2.0"
   domain: "dev-platform"
-  description: "The Omadia Dev Platform — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470). This release is the P0 scaffold: it activates and deactivates cleanly and contributes nothing yet."
+  description: "The Omadia Dev Platform — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470)."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
@@ -41,75 +41,333 @@ lifecycle:
   entry: "dist/plugin.js"
 
 # ---------------------------------------------------------------------------
-# permissions — DOCUMENTED, NOT DECLARED.
+# requires — capabilities this plugin RESOLVES at runtime.
 #
-# Everything below is commented out on purpose. Unknown manifest keys are
-# silently IGNORED by the current core loader, not rejected
-# (specs/470-dev-platform-plugin/implementation.md §2.5). A plugin that declares
-# a future field against an unpatched core therefore activates with no grant and
-# no error — the worst possible failure shape. So these stay comments until the
-# capability that reads them has actually shipped, and each is uncommented in
-# the same PR that lands its enforcement.
+# Since epic #470 C2b, `ctx.services.get(name)` throws `ServiceNotDeclaredError`
+# for a name that appears in neither `requires` nor `provides`. So this list is
+# not documentation: every entry below is a name `activate()` actually asks for,
+# and an entry removed here becomes a throw, not a silent degradation.
 #
-# permissions:
-#   # Gates the EXISTING `graphPool@1` capability so the plugin may own tables
-#   # and run its own migrations (#470 C7 / G4). Do NOT invent a `pgPool`
-#   # capability name — `graphPool@1` is the established one.
-#   # Ships with: shared `runPluginMigrations` + advisory lock + ledger-name
-#   # validation + a MigrationReport.
-#   sql: true
-#
-#   # Manifest-declared, operator-consented public-path grants with exclusive
-#   # prefix ownership (#470 C4 / H1). The dev runner phones home unauthenticated
-#   # to its own prefix; today that is covered by two STATIC exemptions in core,
-#   # which are removed only in C12, after this grant is proven on staging.
-#   public_paths:
-#     - "/bot-api/dev-runner"
-#     - "/bot-api/dev-webhooks"
+#   graphPool@1      REQUIRED. The Postgres pool the job spine, repo, gate and
+#                    artifact tables live in. Additionally gated by
+#                    `permissions.sql` + an operator grant (C7) — a `requires:`
+#                    line is the author's own say-so, and that is the wrong bar
+#                    for the pool core writes user data through.
+#   turnContext@1    Optional-by-presence. The chat dev-job tools authorize PER
+#                    CALL against the human driving the turn; without it there is
+#                    no envelope, so the tools are not registered at all rather
+#                    than registered-and-always-refusing.
+#   githubAppJwt@1   Optional. Core does not publish it yet; the plugin falls
+#                    back to a local RS256 signer. See SEAMS.md S2.
+#   usageTelemetry@1 Optional. The operator cost dashboard's ledger. Per-job
+#                    budgets do NOT depend on it — they meter this plugin's own
+#                    tables. See SEAMS.md S6.
+#   conductorRoles@1 Optional. Live holder resolution for repos whose approver is
+#                    a ROLE. Absent means role gates are unapprovable
+#                    (fail-closed). See SEAMS.md S7.
 # ---------------------------------------------------------------------------
+requires:
+  - "graphPool@1"
+  - "turnContext@1"
+  - "githubAppJwt@1"
+  - "usageTelemetry@1"
+  - "conductorRoles@1"
+
+permissions:
+  # Epic #470 C7 / G4 — the plugin owns tables and runs its own migrations.
+  #
+  # The ledger name must sit inside the kernel-owned `plg_` namespace, as
+  # `plg_<sanitized-plugin-id>_<suffix>`: `@omadia/dev-platform` folds to
+  # `omadia_dev_platform`, so this plugin may only claim
+  # `plg_omadia_dev_platform_*`. Two rules in one name — no core table can ever
+  # live under `plg_`, and no plugin can nominate another plugin's ledger and
+  # forge its migration history. The prefix is necessary but not sufficient
+  # (`acme_tool` and `acme_tool_extra` share a prefix); exclusive ownership is
+  # enforced by `UNIQUE (ledger)` in `plugin_sql_grants`.
+  sql:
+    migrations: "migrations"
+    ledger: "plg_omadia_dev_platform_migrations"
+
+  # Epic #470 C4 / H1 — the prefixes served WITHOUT a kernel session, declared
+  # here so the operator sees the request at install time and grants it
+  # explicitly. Each is authenticated, just not by a session:
+  #
+  #   /api/v1/dev-runner    per-job bearer token, verified inside the router. A
+  #                         runner has no session; a session guard here would be
+  #                         a total lockout, and the router's own token check is
+  #                         the real gate.
+  #   /api/webhooks/github  HMAC-SHA256 over the RAW request body.
+  #   /api/v1/dev-platform  the GitHub App manifest-conversion callback, bound
+  #                         to a kernel-signed, plugin-audience state token.
+  #
+  # These three are `PUBLIC_PATHS` in src/plugin.ts; test/manifest.test.ts
+  # asserts the two lists are equal, because a prefix present in one and absent
+  # from the other is either an unreachable route or an unguarded one.
+  public_paths:
+    - "/api/v1/dev-runner"
+    - "/api/webhooks/github"
+    - "/api/v1/dev-platform"
+
+  # Runtime credential writes. As an operator connects repositories the plugin
+  # persists GitHub App signing material, webhook secrets and per-repo clone
+  # tokens into its OWN vault namespace. Without this every repository is
+  # unconnectable, so `activate()` refuses rather than degrading.
+  secrets:
+    runtime_write: true
+
+  # Outbound hosts. `github.com` for the device/OAuth endpoints,
+  # `api.github.com` for the forge + issue APIs, `api.machines.dev` for the Fly
+  # runner backend, and the LLM upstream the proxy forwards to.
+  network:
+    outbound:
+      - "api.github.com"
+      - "github.com"
+      - "api.machines.dev"
+      - "api.anthropic.com"
 
 setup:
   guide:
     en: |
-      ## Dev Platform — scaffold release
+      ## Dev Platform
 
-      This build installs and activates, and does nothing else. It is the
-      groundwork release of epic #470, which moves the Dev Platform out of
-      omadia core into this plugin. Its purpose is to prove the packaging and
-      install path while the artifact is still empty and a mistake is cheap.
+      Runs coding jobs against your repositories: an agent clones the repo in an
+      isolated runner, works the job, and opens a pull request. Human gates,
+      diff policy and per-job LLM budgets bound what it can do.
 
-      **There is nothing to configure yet.** No fields, no credentials, no
-      routes, no database changes.
+      ### Before you install
 
-      The real setup guide arrives with the payload:
+      **A Postgres-backed knowledge graph is required.** The job spine, repo,
+      gate and artifact tables live there. With an in-memory graph the plugin
+      refuses to activate rather than pretending to work — set `DATABASE_URL`
+      and install the Neon knowledge-graph plugin first.
 
-      - **P2** — the Dev Platform UI.
-      - **P3** — dev jobs, runners, routes and the plugin's own migrations.
-        This is where connection settings, runner backend selection and budget
-        limits will be configured.
-      - **P4** — the runner sidecar images and their supply chain.
+      **Grant the SQL permission.** This plugin owns nine tables and migrates
+      them itself, into its own ledger (`omadia_dev_platform_migrations`).
 
-      Until then, installing this plugin is safe and reversible: uninstalling it
-      leaves no tables, no routes and no scheduled work behind.
+      ### What lives here, and what lives in your deployment
+
+      The fields below are **policy** — the decisions only you can make: how much
+      a job may spend, how long it may run, how many run at once, which models it
+      may call, how long its history is kept.
+
+      **Infrastructure is not asked for here.** The runner image, the runner
+      daemon URL and token, and the dedicated Fly app are set in the compose
+      overlay alongside the sidecars themselves (`DEV_RUNNER_IMAGE`,
+      `DEV_RUNNER_DAEMON_URL`, `DEV_RUNNER_DAEMON_TOKEN`, `DEV_FLY_RUNNER_APP`).
+      A second copy in this form would be a second thing to keep in sync.
+
+      ### Two switches that need a second confirmation
+
+      *Subscription mode* runs jobs against a CLI subscription credential inside
+      the runner. *Unsafe local backend* runs the shim as a local process instead
+      of in a container. Each demands its paired acknowledgment field, and
+      **activation is refused** if you turn one on without it. That refusal is
+      deliberate: both modes put a credential or your host filesystem within
+      reach of code an agent wrote.
+
+      ### After installing
+
+      Connect a repository under **Dev Platform → Repositories**. A GitHub App
+      is the recommended credential — the runner then receives a freshly minted,
+      single-repo, read-only token that is revoked when the job ends.
     de: |
-      ## Dev Platform — Grundgerüst-Release
+      ## Dev Platform
 
-      Dieses Build installiert und aktiviert sich, und sonst nichts. Es ist das
-      Fundament-Release von Epic #470, das die Dev Platform aus dem omadia-Kern
-      in dieses Plugin verlagert. Der Zweck: den Verpackungs- und Installations-
-      weg beweisen, solange das Artefakt noch leer und ein Fehler billig ist.
+      Führt Coding-Jobs gegen deine Repositories aus: Ein Agent klont das Repo in
+      einem isolierten Runner, arbeitet den Job ab und öffnet einen Pull Request.
+      Human Gates, Diff-Policy und Budgets pro Job begrenzen, was dabei passieren
+      kann.
 
-      **Es gibt noch nichts zu konfigurieren.** Keine Felder, keine Zugangs-
-      daten, keine Routen, keine Datenbank-Änderungen.
+      ### Vor der Installation
 
-      Die echte Setup-Anleitung kommt mit der Fracht:
+      **Ein Postgres-gestützter Knowledge Graph ist Voraussetzung.** Job-,
+      Repo-, Gate- und Artefakt-Tabellen liegen dort. Mit einem In-Memory-Graph
+      verweigert das Plugin die Aktivierung, statt Betrieb vorzutäuschen — setze
+      zuerst `DATABASE_URL` und installiere das Neon-Knowledge-Graph-Plugin.
 
-      - **P2** — die Dev-Platform-Oberfläche.
-      - **P3** — Dev Jobs, Runner, Routen und die eigenen Migrationen des
-        Plugins. Dort werden Verbindungseinstellungen, Runner-Backend und
-        Budget-Limits konfiguriert.
-      - **P4** — die Runner-Sidecar-Images und ihre Supply Chain.
+      **Erteile die SQL-Berechtigung.** Das Plugin besitzt neun Tabellen und
+      migriert sie selbst, in sein eigenes Ledger
+      (`omadia_dev_platform_migrations`).
 
-      Bis dahin ist die Installation gefahrlos und umkehrbar: Beim Deinstallieren
-      bleiben keine Tabellen, Routen oder geplanten Jobs zurück.
-  fields: []
+      ### Was hier steht — und was in dein Deployment gehört
+
+      Die Felder unten sind **Policy**: Entscheidungen, die nur du treffen
+      kannst. Wie viel ein Job ausgeben darf, wie lange er laufen darf, wie viele
+      parallel laufen, welche Modelle er nutzen darf, wie lange die Historie
+      aufbewahrt wird.
+
+      **Infrastruktur wird hier nicht abgefragt.** Runner-Image, Daemon-URL und
+      -Token sowie die dedizierte Fly-App stehen im Compose-Overlay direkt bei
+      den Sidecars (`DEV_RUNNER_IMAGE`, `DEV_RUNNER_DAEMON_URL`,
+      `DEV_RUNNER_DAEMON_TOKEN`, `DEV_FLY_RUNNER_APP`). Eine zweite Kopie in
+      diesem Formular wäre nur eine zweite Stelle, die auseinanderlaufen kann.
+
+      ### Zwei Schalter mit Gegenbestätigung
+
+      *Subscription-Modus* nutzt eine CLI-Abo-Credential im Runner. *Unsafe Local
+      Backend* startet den Shim als lokalen Prozess statt im Container. Beide
+      verlangen ihr zugehöriges Bestätigungsfeld — fehlt es, **wird die
+      Aktivierung verweigert**. Das ist Absicht: Beide Modi bringen eine
+      Credential oder dein Host-Dateisystem in Reichweite von Code, den ein Agent
+      geschrieben hat.
+
+      ### Nach der Installation
+
+      Verbinde ein Repository unter **Dev Platform → Repositories**. Eine GitHub
+      App ist die empfohlene Credential — der Runner bekommt dann ein frisch
+      erzeugtes, auf ein Repo begrenztes Lese-Token, das am Job-Ende widerrufen
+      wird.
+
+  fields:
+    # --- reachability -------------------------------------------------------
+    - key: "runner_base_url"
+      type: "url"
+      label: "Runner phone-home base URL"
+      help: "The base URL a runner reaches this middleware at, e.g. https://bot.example.com. Runners are launched OUTSIDE this process and call back to it; a loopback address only works when the runner shares the host."
+      required: false
+
+    - key: "commit_author"
+      type: "string"
+      label: "Commit author"
+      help: "Identity on commits the platform pushes, as `Name <email>`."
+      default: "omadia dev platform <dev-platform@omadia.ai>"
+      required: false
+
+    # --- concurrency + time bounds -----------------------------------------
+    - key: "max_concurrent_jobs"
+      type: "integer"
+      label: "Max concurrent jobs"
+      help: "How many jobs may run at once. Each one holds a runner."
+      default: "2"
+      required: false
+
+    - key: "job_wall_clock_ms"
+      type: "integer"
+      label: "Job wall-clock limit (ms)"
+      help: "Hard ceiling on one job's total runtime. Exceeding it terminates the runner and fails the job."
+      default: "2700000"
+      required: false
+
+    - key: "heartbeat_timeout_ms"
+      type: "integer"
+      label: "Heartbeat timeout (ms)"
+      help: "A runner silent for longer is treated as stalled and reaped."
+      default: "300000"
+      required: false
+
+    # --- LLM policy + budget ------------------------------------------------
+    - key: "llm_allowed_models"
+      type: "host_list"
+      label: "Allowed models"
+      help: "Model ids a job's agent may call through the proxy. EMPTY MEANS NO JOB CAN RUN — the proxy answers 500 with no policy. A model with no entry in the price table cannot have its cost budget enforced; the plugin logs a warning naming it at activation."
+      required: false
+
+    - key: "llm_default_budget_usd"
+      type: "integer"
+      label: "Default budget per job (USD)"
+      help: "Cost ceiling for one job's LLM spend, unless the repository overrides it. Crossing it marks the job budget_exceeded and terminates the runner mid-call."
+      default: "5"
+      required: false
+
+    - key: "llm_max_output_tokens"
+      type: "integer"
+      label: "Max output tokens per call"
+      help: "Clamp on max_tokens. Bounds how far a single response can overshoot the budget before enforcement sees it."
+      default: "8192"
+      required: false
+
+    # --- data lifecycle -----------------------------------------------------
+    - key: "event_retention_days"
+      type: "integer"
+      label: "Event retention (days)"
+      help: "Age at which low-value job telemetry is pruned by the nightly sweep."
+      default: "30"
+      required: false
+
+    - key: "audit_retention_days"
+      type: "integer"
+      label: "Audit retention (days)"
+      help: "Outer bound for audit-grade events (gate decisions, policy verdicts, token mint and revoke)."
+      default: "365"
+      required: false
+
+    - key: "max_events_per_job"
+      type: "integer"
+      label: "Max events per job"
+      help: "Per-job event cap, enforced at write time. A chatty runner is truncated rather than allowed to fill the table."
+      default: "5000"
+      required: false
+
+    - key: "artifact_max_bytes"
+      type: "integer"
+      label: "Max inline artifact size (bytes)"
+      help: "Ceiling on a single stored artifact (diff, brief, verdict)."
+      default: "1048576"
+      required: false
+
+    # --- webhook triggers ---------------------------------------------------
+    - key: "webhooks_enabled"
+      type: "boolean"
+      label: "Accept GitHub webhooks"
+      help: "Let labelled issues create jobs automatically. Off means no webhook route is registered at all."
+      default: "true"
+      required: false
+
+    - key: "webhook_max_jobs_per_repo_hour"
+      type: "integer"
+      label: "Webhook jobs per repo per hour"
+      help: "Rate ceiling per repository. A webhook is a public trigger — this is what bounds a label-spam incident."
+      default: "10"
+      required: false
+
+    - key: "webhook_max_jobs_per_sender_hour"
+      type: "integer"
+      label: "Webhook jobs per sender per hour"
+      help: "Rate ceiling per GitHub user."
+      default: "5"
+      required: false
+
+    - key: "egress_base_allowlist"
+      type: "host_list"
+      label: "Extra egress hosts for runners"
+      help: "Hosts a runner may reach beyond the defaults (package registries and the like). Private and link-local addresses are rejected."
+      required: false
+
+    # --- the two interlocked safety switches --------------------------------
+    # These CANNOT be expressed as a flat field list, which is exactly why they
+    # are enforced in activate() as refusals rather than trusted here. Shipping
+    # them as two independent optional booleans would silently delete a
+    # boot-time safety refusal (plan.md §6).
+    - key: "subscription_mode"
+      type: "boolean"
+      label: "Subscription mode"
+      help: "Run jobs against a CLI subscription credential inside the runner. REQUIRES the acknowledgment below — activation is refused without it."
+      default: "false"
+      required: false
+
+    - key: "subscription_ack"
+      type: "string"
+      label: "Subscription acknowledgment"
+      help: "Type your name to acknowledge that subscription jobs run your CLI credential inside a runner executing agent-written code. Required whenever subscription mode is on."
+      required: false
+
+    - key: "unsafe_local"
+      type: "boolean"
+      label: "Unsafe local backend"
+      help: "Run the shim as a local process instead of in a container. Development only. REQUIRES the uid below — activation is refused without it."
+      default: "false"
+      required: false
+
+    - key: "unsafe_local_uid"
+      type: "integer"
+      label: "Local runner uid"
+      help: "Dedicated unprivileged uid the jailed shim runs as. NEVER 0. Required whenever the unsafe local backend is on."
+      required: false
+
+    # --- dormant ------------------------------------------------------------
+    - key: "tracker_polling_enabled"
+      type: "boolean"
+      label: "Tracker polling (not yet available)"
+      help: "Poll a Jira or Linear tracker for labelled tickets. NOT WIRED in this release — six hardening fixes gate switch-on (cold-start budget, sender allowlist, label-application trigger, cross-source dedupe, ticket-id namespacing, frozen provider contract). Turning it on records the intent and logs a warning; nothing polls."
+      default: "false"
+      required: false

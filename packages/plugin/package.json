@@ -1,6 +1,6 @@
 {
   "name": "@omadia/dev-platform",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/plugin.js",
@@ -12,23 +12,34 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "migrations",
+    "manifest.yaml"
   ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.mjs",
     "package": "node scripts/build-zip.mjs",
+    "codegen:migrations": "node scripts/codegen-migrations.mjs",
     "clean": "rm -rf dist out .test-build *.tsbuildinfo"
   },
   "peerDependencies": {
     "@omadia/dev-platform-plugin-api": "*",
-    "@omadia/plugin-api": "*"
+    "@omadia/plugin-api": "*",
+    "express": "^5.0.0",
+    "pg": "^8.0.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@omadia/dev-platform-plugin-api": "*"
+    "@omadia/dev-platform-plugin-api": "*",
+    "@types/express": "^5.0.0",
+    "@types/pg": "^8.15.0",
+    "express": "^5.1.0",
+    "pg": "^8.16.0",
+    "zod": "^4.1.0"
   },
-  "description": "The Omadia Dev Platform as an installable plugin — dev jobs, runner orchestration, its own routes, tools and migrations. Extracted from omadia core per epic byte5ai/omadia#470. Scaffold only: the middleware tree lands in P3, the SPA in P2.",
+  "description": "The Omadia Dev Platform as an installable plugin — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core per epic byte5ai/omadia#470 (P3: the middleware tree).",
   "license": "MIT",
   "engines": {
     "node": ">=20"

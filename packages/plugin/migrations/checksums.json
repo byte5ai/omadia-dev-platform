@@ -1,0 +1,11 @@
+{
+  "0022_dev_platform.sql": "38ddcd9cb5cc6e0e182c91f0bb32bccad7fc414b4d828cd63f6fc5efd92573c1",
+  "0023_dev_platform_pipeline.sql": "a4ba8908c00c250b11861968986dbc1d11889592b36866d6e47ccac21d795f17",
+  "0024_dev_platform_w3.sql": "1ce46780f9333cf123df4979563e37498ead3a737adacc227170071448f31434",
+  "0025_dev_jobs_source_plugin.sql": "eea29b28f29f081328b485d1870055fb8e448328481fec70b8286fa392b7ceb0",
+  "0026_dev_job_gate_kind.sql": "955dd7f78f868981e0920fb994f2bbcab678ba8dbb17ce1efb214570e8d93ce8",
+  "0027_dev_platform_triggers.sql": "c38589930e5ec0052f44c1a021b1bbb980969b09f9185198e8f2cffa82ce16a3",
+  "0028_dev_jobs_webhook_one_active.sql": "965ad2a034dcb5395cddbfa12e23194158e8938825faf69945659acd93675cea",
+  "0029_dev_platform_retention.sql": "e17a07ba5007d8911a8175126275e7f40d7f586e8fa1c056580ea3b96ff8f07f",
+  "0030_dev_job_events_truncated_marker.sql": "7eed8c9d25f7b6c3ab9f4f7a3864cccfad6609ad87df1310bc1d94c96f0bd291"
+}

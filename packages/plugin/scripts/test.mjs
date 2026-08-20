@@ -2,41 +2,67 @@
 /**
  * test.mjs — run the TypeScript test suite with zero extra dependencies.
  *
- * Node's built-in test runner (`node:test`) + assert drive the tests; esbuild
- * (a dev dependency of the workspace root) transpiles each `tests/*.test.ts`
- * into `.test-build/` first, then `node --test` runs the transpiled output.
+ *     npm test                      # everything
+ *     npm test -- devWebhooks       # only files whose path contains 'devWebhooks'
  *
- * Adapted from `omadia-integration-odoo/scripts/test.mjs`. The differences:
- * paths resolve from this file rather than from `process.cwd()` (so `npm test
- * -w packages/plugin` and a direct invocation agree), and the suite is run with
- * `cwd: pkgRoot` because the smoke test resolves `dist/plugin.js` relative to
- * it — the point of that test is to load the BUILT artifact, not a bundled copy
- * of the source.
+ * Node's built-in runner (`node:test`) drives the tests; esbuild transpiles each
+ * `test/**\/*.test.ts` into `.test-build/` first.
+ *
+ * ## What is EXTERNAL, and why it matters
+ *
+ * Everything the Omadia host provides at runtime — `@omadia/plugin-api`,
+ * `@omadia/dev-platform-plugin-api`, `express`, `pg`, `zod` — is marked
+ * external. Bundling `pg` would give the suite a SECOND copy of the driver, and
+ * `instanceof Pool` checks across two copies fail in ways that read as logic
+ * bugs. The plugin's OWN sources are bundled, so a test exercises the tree as
+ * written rather than the emitted `dist/`.
+ *
+ * ## Postgres suites
+ *
+ * `*.pg.test.ts` need a database and skip LOUDLY without one (issue #572 — a
+ * skipped suite must never read as a passing one). Start the CI recipe container
+ * and point the suites at it:
+ *
+ *     docker run -d --name omadia-pg-test -p 55438:5432 \
+ *       -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test pgvector/pgvector:pg16
+ *     export DEV_PLATFORM_PG_TEST_URL=postgres://test:test@127.0.0.1:55438/test
+ *     export OMADIA_CORE_DIR=../odoo-bot     # core's base migrations 0001-0021
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { build } from 'esbuild';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, '..');
-const testsDir = join(pkgRoot, 'tests');
+const testsDir = join(pkgRoot, 'test');
 const outDir = join(pkgRoot, '.test-build');
+const filter = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 
 if (!existsSync(join(pkgRoot, 'dist', 'plugin.js'))) {
   console.error('dist/plugin.js is missing — run `npm run build` first.');
   process.exit(1);
 }
 
-const entryPoints = readdirSync(testsDir)
-  .filter((f) => f.endsWith('.test.ts'))
-  .map((f) => join(testsDir, f));
+/** Recursive, because `test/_helpers/` sits beside the suites. */
+function walk(dir, acc = []) {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) walk(p, acc);
+    else if (name.endsWith('.test.ts')) acc.push(p);
+  }
+  return acc;
+}
 
+let entryPoints = walk(testsDir).sort();
+if (filter.length > 0) {
+  entryPoints = entryPoints.filter((p) => filter.some((f) => p.includes(f)));
+}
 if (entryPoints.length === 0) {
-  console.error('no tests found in tests/');
+  console.error(`no tests found in test/${filter.length ? ` matching ${filter.join(', ')}` : ''}`);
   process.exit(1);
 }
 
@@ -46,22 +72,51 @@ console.log(`▶ transpiling ${entryPoints.length} test file(s)`);
 await build({
   entryPoints,
   outdir: outDir,
+  outbase: testsDir,
   bundle: true,
   platform: 'node',
   format: 'esm',
   target: 'node20',
   sourcemap: 'inline',
   logLevel: 'error',
-  external: ['@omadia/plugin-api', '@omadia/dev-platform-plugin-api'],
+  // Host-provided at runtime. See the header — a second copy of `pg` breaks
+  // `instanceof` in ways that look like logic bugs.
+  external: ['@omadia/plugin-api', '@omadia/dev-platform-plugin-api', 'express', 'pg', 'zod'],
 });
 
-const built = readdirSync(outDir)
-  .filter((f) => f.endsWith('.js'))
-  .map((f) => join(outDir, f));
+const built = walk(outDir, []).length ? [] : [];
+const builtFiles = [];
+(function collect(dir) {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) collect(p);
+    else if (name.endsWith('.js')) builtFiles.push(p);
+  }
+})(outDir);
 
-console.log('▶ node --test');
-const res = spawnSync(process.execPath, ['--test', ...built], {
+/**
+ * Serialise the run when a Postgres URL is configured.
+ *
+ * `node --test` runs test FILES in parallel. That is free while every suite is
+ * pure, and it is WRONG the moment a dozen of them share one database: several
+ * of these suites start a real `DevJobWorker` claim loop against the same
+ * `dev_jobs` table, so one suite's worker claims another suite's job and both
+ * report a defect that exists in neither ("lease lost", "the job was
+ * claimable"). Every one of them passes alone.
+ *
+ * The same shape is on record in core as a long-standing full-suite flake. It
+ * is inherited with the tree, not introduced by the port — and this repo owns
+ * its runner, so it gets fixed here instead of carried. Concurrency stays on
+ * for the pure run, where it costs nothing and there is nothing to race.
+ */
+const usesPg = ['DEV_PLATFORM_PG_TEST_URL', 'GRAPH_PG_TEST_URL', 'MEMORY_PG_TEST_URL', 'WS5_PG_TEST_URL', 'DATABASE_URL']
+  .some((v) => (process.env[v] ?? '').trim().length > 0);
+const concurrency = usesPg ? ['--test-concurrency=1'] : [];
+
+console.log(`▶ node --test (${builtFiles.length} file(s)${usesPg ? ', serial — shared database' : ''})`);
+const res = spawnSync(process.execPath, ['--test', ...concurrency, ...builtFiles.sort()], {
   cwd: pkgRoot,
   stdio: 'inherit',
+  env: process.env,
 });
 process.exit(res.status ?? 1);
