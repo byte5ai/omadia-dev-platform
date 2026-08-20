@@ -12,27 +12,31 @@
  * SIEM feed.
  *
  * Usage:
- *   npx tsx scripts/dev-transcript.ts purge --older-than 365
- *   npx tsx scripts/dev-transcript.ts purge                 # defaults to
+ *   node dist/scripts/dev-transcript.js purge --older-than 365
+ *   node dist/scripts/dev-transcript.js purge                 # defaults to
  *                                                            # DEV_PLATFORM_AUDIT_RETENTION_DAYS
- *   npx tsx scripts/dev-transcript.ts purge --older-than 30 --dry-run
- *   npx tsx scripts/dev-transcript.ts list <jobId>
- *   npx tsx scripts/dev-transcript.ts export <jobId> [--redact] > job.jsonl
- *   npx tsx scripts/dev-transcript.ts search '<query>' [--since 2026-01-01T00:00:00Z]
+ *   node dist/scripts/dev-transcript.js purge --older-than 30 --dry-run
+ *   node dist/scripts/dev-transcript.js list <jobId>
+ *   node dist/scripts/dev-transcript.js export <jobId> [--redact] > job.jsonl
+ *   node dist/scripts/dev-transcript.js search '<query>' [--since 2026-01-01T00:00:00Z]
  *
  * Env: DATABASE_URL (required),
  *      DEV_PLATFORM_AUDIT_RETENTION_DAYS (default 365, used when --older-than omitted).
  */
-import 'dotenv/config';
+// No `dotenv/config`. In core this script ran inside the middleware checkout,
+// where a `.env` was the normal way to reach the database; here it is an
+// OPERATOR tool run against a deployment, and silently sourcing whatever `.env`
+// happens to be in the working directory is how a purge gets pointed at the
+// wrong database. DATABASE_URL is passed explicitly or the script refuses.
 import { Pool } from 'pg';
 
-import { redactSecrets } from '../src/devplatform/policy/scanForSecrets.js';
-import { DevRetentionRunner } from '../src/devplatform/retention.js';
+import { redactSecrets } from '../src/policy/scanForSecrets.js';
+import { DevRetentionRunner } from '../src/retention.js';
 import {
   exportJobArtifacts,
   listJobArtifacts,
   searchArtifacts,
-} from '../src/devplatform/transcriptQueries.js';
+} from '../src/transcriptQueries.js';
 
 const TERMINAL_STATUSES = ['done', 'failed', 'cancelled', 'stalled', 'budget_exceeded'];
 
