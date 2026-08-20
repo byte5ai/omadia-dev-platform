@@ -14,9 +14,11 @@
     "typecheck": "npm run build -w packages/plugin-api && npm run typecheck --workspaces --if-present",
     "test": "npm run test -w packages/plugin",
     "package": "npm run package -w packages/plugin",
-    "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
+    "clean": "npm run clean --workspaces --if-present && rm -rf node_modules",
+    "link:core": "node scripts/link-core.mjs",
+    "codegen:migrations": "npm run codegen:migrations -w packages/plugin"
   },
-  "//esbuild": "The sibling plugin repos pin ^0.24.0; this one does not. esbuild <=0.24.2 carries GHSA-67mh-4wv8-2f99 (the dev server answers cross-origin requests), and a brand-new public repo should not ship with a known advisory. We only ever call the build() API from scripts/test.mjs — never serve() — so the advisory does not reach us either way, but the fix is free.",
+  "//esbuild": "The sibling plugin repos pin ^0.24.0; this one does not. esbuild <=0.24.2 carries GHSA-67mh-4wv8-2f99 (the dev server answers cross-origin requests), and a brand-new public repo should not ship with a known advisory. We only ever call the build() API from scripts/test.mjs \u2014 never serve() \u2014 so the advisory does not reach us either way, but the fix is free.",
   "devDependencies": {
     "typescript": "^6.0.2",
     "@types/node": "^25.6.0",

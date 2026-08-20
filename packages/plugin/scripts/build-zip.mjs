@@ -37,6 +37,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -49,14 +50,27 @@ import { fileURLToPath } from 'node:url';
  *  same archive. */
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Everything the host needs at runtime. `node_modules` must never be in here. */
+/** Everything the host needs at runtime. `node_modules` must never be in here.
+ *
+ * `migrations/` is REQUIRED, not optional. `permissions.sql.migrations` names
+ * it, `ctx.sql.runMigrations()` reads it, and the kernel THROWS on an empty or
+ * missing directory rather than treating it as "no migrations to run" — which
+ * is the right call, and it means a ZIP cut without this directory installs and
+ * then fails at activation with the plugin's nine tables absent. The first cut
+ * of this script shipped exactly that ZIP.
+ */
 const REQUIRED_FILES = ['manifest.yaml'];
-const REQUIRED_DIRS = ['dist'];
+const REQUIRED_DIRS = ['dist', 'migrations'];
 const OPTIONAL_FILES = ['README.md', 'LICENSE', 'NOTICE'];
 const OPTIONAL_DIRS = ['assets', 'skills'];
 
 /** The manifest's `lifecycle.entry`. Its absence means `tsc` did not finish. */
 const REQUIRED_IN_DIST = ['plugin.js'];
+
+/** The nine codegen'd migrations, by name. Counted rather than assumed: a
+ *  partial codegen produces a directory that exists, passes the check above, and
+ *  leaves the plugin a schema short. */
+const REQUIRED_MIGRATION_COUNT = 9;
 
 const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'));
 if (!pkg.name || !pkg.version) {
@@ -129,6 +143,24 @@ for (const rel of REQUIRED_IN_DIST) {
     throw new Error(`staged dist/ is missing ${rel} — the build artefact is incomplete`);
   }
 }
+
+// The ZIP extension allowlist has no `.sql` (bug B4), which is why these are
+// `.js` at all. Verify the codegen actually ran AND produced all nine: a ZIP one
+// migration short installs cleanly and breaks at activation.
+const stagedMigrations = readdirSync(join(stageDir, 'migrations')).filter((f) => f.endsWith('.js'));
+if (stagedMigrations.length !== REQUIRED_MIGRATION_COUNT) {
+  throw new Error(
+    `staged migrations/ has ${stagedMigrations.length} .js file(s), expected ${REQUIRED_MIGRATION_COUNT} — ` +
+      'run `npm run codegen:migrations` against a core checkout',
+  );
+}
+if (readdirSync(join(stageDir, 'migrations')).some((f) => f.endsWith('.sql'))) {
+  throw new Error(
+    'staged migrations/ contains a .sql file — `.sql` is NOT in the ZIP extension allowlist ' +
+      '(zipExtractor.ts), so it would be silently dropped on install',
+  );
+}
+console.log(`  + migrations/ verified (${stagedMigrations.length} codegen'd + checksums.json)`);
 
 // --- package.json, without devDependencies ---------------------------------
 // devDependencies are meaningless inside a published artifact — nothing ever

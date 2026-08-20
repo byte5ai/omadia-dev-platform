@@ -3,6 +3,12 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: 'byte5ai/omadia ref to build @omadia/plugin-api from'
+        required: false
+        default: 'main'
 
 permissions:
   contents: read
@@ -13,13 +19,47 @@ permissions:
 # touches this repo sets `working-directory`. Checking this repo out at the
 # workspace root instead would put `../odoo-bot` outside the workspace, where
 # checkout cannot place it.
+#
+# OMADIA_CORE_REF pins which core ref supplies `@omadia/plugin-api`. It is
+# `main`, and `test/coreApiSurface.test.ts` is what keeps that honest: this
+# package imports exactly two type names from core's contract package, both on
+# `main` since long before epic #470, and the plugin context is declared
+# structurally rather than imported. So the C6/C7 additions (`ctx.sql`, the
+# route `auth`/`body` options) are describable here while those branches are
+# still open, and nothing has to be vendored or marked TEMP.
+#
+# Override it to build against a contract branch:
+#   gh workflow run ci.yml -f core_ref=feat/470-c6-session-auth-raw-body
 env:
   SELF: omadia-dev-platform
   CORE: odoo-bot
+  OMADIA_CORE_REF: ${{ inputs.core_ref || 'main' }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # The Postgres suites need a real database and skip loudly without one. A
+    # skipped suite that reads as a passing one is the failure this repo cannot
+    # afford right after a 60-file port, so CI supplies the database rather than
+    # accepting the skip. `pgvector` because core's base migrations create the
+    # `vector` extension; a plain `postgres:16` answers the probe and then dies
+    # on `CREATE EXTENSION vector`.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 55438:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout omadia-dev-platform
         uses: actions/checkout@v4
@@ -33,6 +73,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: byte5ai/omadia
+          ref: ${{ env.OMADIA_CORE_REF }}
           path: odoo-bot
 
       - uses: actions/setup-node@v4
@@ -78,9 +119,36 @@ jobs:
         working-directory: omadia-dev-platform
         run: npm run build
 
+      # OMADIA_CORE_DIR points the test bootstrap at the sibling checkout for
+      # core's base migrations 0001-0021: this plugin's tables reference them,
+      # so a bare database cannot run its schema at all. The plugin's own nine
+      # are then applied from the SHIPPED `.js` artifacts, so the pg suites
+      # exercise what the ZIP contains.
+      #
+      # With a database configured the runner switches to --test-concurrency=1:
+      # several suites drive a real DevJobWorker claim loop and, run in
+      # parallel against one database, claim each other's jobs.
       - name: Test
         working-directory: omadia-dev-platform
+        env:
+          GRAPH_PG_TEST_URL: postgres://test:test@127.0.0.1:55438/test
+          OMADIA_CORE_DIR: ${{ github.workspace }}/odoo-bot
         run: npm test
+
+      # A green suite with every pg case skipped is not a green suite. Fail the
+      # run if the database CI just provisioned was not actually reached.
+      - name: Assert the Postgres suites actually ran
+        working-directory: omadia-dev-platform
+        env:
+          GRAPH_PG_TEST_URL: postgres://test:test@127.0.0.1:55438/test
+          OMADIA_CORE_DIR: ${{ github.workspace }}/odoo-bot
+        run: |
+          npm test -- devJobStore.pg 2>&1 | tee /tmp/pg-probe.log
+          grep -qE '^# pass [1-9]' /tmp/pg-probe.log
+          if grep -qi 'skipping' /tmp/pg-probe.log; then
+            echo "::error::the Postgres suites skipped — the service container was not reachable"
+            exit 1
+          fi
 
       - name: Package
         working-directory: omadia-dev-platform

@@ -17,6 +17,42 @@ npm install
 
 [omadia]: https://github.com/byte5ai/omadia
 
+### Building against an unmerged core branch — `OMADIA_CORE_DIR`
+
+The committed default in `package.json` is
+`file:../odoo-bot/middleware/packages/plugin-api`, and it stays that way: it is
+what CI and every normal checkout use, and it is the pattern
+`omadia-byte5-plugins` has run in production for six plugins
+(`implementation.md` D1). **Do not edit it** — a `file:` path pointing at a
+throwaway worktree is one machine's directory layout committed to a public
+repository.
+
+Contract work happens on unmerged core branches, though, so the override is a
+symlink instead:
+
+```bash
+# e.g. a worktree with #470 C6 + C7 merged
+git -C ../odoo-bot worktree add /tmp/odoo-bot-470-api origin/feat/470-c6-session-auth-raw-body
+git -C /tmp/odoo-bot-470-api merge origin/feat/470-c7-sql-permission-plugin-migrations
+(cd /tmp/odoo-bot-470-api/middleware && npm install && npm run build)
+
+OMADIA_CORE_DIR=/tmp/odoo-bot-470-api npm run link:core
+```
+
+`scripts/link-core.mjs` points `node_modules/@omadia/plugin-api` at that
+checkout. `node_modules/` is gitignored, so nothing it writes can be committed.
+It verifies the target is **built** — `tsc` resolves the package through its
+emitted `dist/index.d.ts`, and a source-only checkout produces a wall of "cannot
+find module" errors that say nothing about the real cause.
+
+`OMADIA_CORE_DIR` is read by three things, all defaulting to `../odoo-bot`:
+
+| Consumer | Uses it for |
+|---|---|
+| `scripts/link-core.mjs` | the `@omadia/plugin-api` symlink |
+| `packages/plugin/scripts/codegen-migrations.mjs` | reading core's `.sql` originals |
+| `packages/plugin/test/_helpers/coreSchema.ts` | core's base migrations, for the pg suites |
+
 ## Before opening a PR
 
 ```bash
@@ -24,6 +60,49 @@ npm run typecheck && npm run build && npm test && npm run package -w packages/pl
 ```
 
 All four must pass. CI runs exactly these.
+
+### Running the Postgres suites
+
+About a third of the suite needs a real database and **skips loudly** without one
+(issue #572 — a skipped suite must never read as a passing one). Start the CI
+recipe container and point the suites at it:
+
+```bash
+docker run -d --name omadia-devplatform-pgtest -p 55438:5432 \
+  -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test \
+  pgvector/pgvector:pg16
+
+export GRAPH_PG_TEST_URL=postgres://test:test@127.0.0.1:55438/test
+export OMADIA_CORE_DIR=../odoo-bot     # core's base migrations 0001-0021
+npm test
+```
+
+The plugin's schema builds on core's, so the bootstrap applies core's base
+migrations first and then this package's nine — from the **shipped `.js`
+artifacts**, so a pg suite exercises what the ZIP contains rather than the `.sql`
+they were generated from.
+
+With a database configured the runner switches to `--test-concurrency=1`.
+Several suites drive a real `DevJobWorker` claim loop, and in parallel they claim
+each other's jobs and report defects that exist in neither. Serial is the fix;
+the pure run stays parallel.
+
+## Migrations
+
+`migrations/*.js` are **generated** — do not edit them. The ZIP extension
+allowlist has no `.sql` (`implementation.md` B4), so a distributed plugin
+structurally cannot ship one; the codegen is D6's answer.
+
+```bash
+OMADIA_CORE_DIR=../odoo-bot npm run codegen:migrations
+```
+
+Filenames are preserved (`.sql` → `.js`) because the ledger is keyed by filename
+and C11 seeds this plugin's ledger from core's donor rows by that key. The SQL
+inside is byte-identical, and `test/migrationSql.test.ts` proves it against
+`migrations/checksums.json` — hashing what the migration passes to
+`client.query`, not the file, so an escaping bug cannot hide behind a
+symmetrical un-escape in the test.
 
 ## Conventions
 
