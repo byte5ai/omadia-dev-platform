@@ -44,6 +44,7 @@ import type { DevJob, DevJobStatus, RunnerBackend } from './types.js';
 import { isTerminalDevJobStatus } from './types.js';
 import type { SecretVault } from './host/vault.js';
 import { createDevPlatformRouter } from './routes/devPlatform.js';
+import { createDevPlatformPurgeRouter } from './routes/devPlatformPurge.js';
 import type {
   DevPlatformDeviceFlow,
   DevPlatformTracker,
@@ -451,6 +452,20 @@ export function assembleDevPlatform(deps: WireDevPlatformDeps): WiredDevPlatform
     ...(deps.deviceFlow ? { deviceFlow: deps.deviceFlow } : {}),
     log,
   });
+
+  // Epic #470 P4 / decision D3 — the type-to-confirm schema purge.
+  //
+  // COMPOSED onto `adminRouter` rather than exposed as a fourth router the
+  // caller has to remember to mount. Two reasons, and the second is the one
+  // that matters: a separately-mounted router is a separately-mountable router,
+  // and the single most dangerous route in this plugin must not be able to end
+  // up registered without the session gate that the admin prefix carries. Here
+  // it is structurally impossible to mount the admin surface WITHOUT its purge
+  // route, or the purge route without the admin surface's authentication.
+  //
+  // Its path (`/admin/purge`) cannot collide with the admin router's own repo
+  // and job paths; `test/devPlatformPurge.test.ts` pins the behaviour.
+  adminRouter.use(createDevPlatformPurgeRouter({ pool: deps.pool, log }));
 
   // --- W1 keystones: job-policy config + the always-mounted LLM proxy --------
   const middlewareHost = cfg.middlewareHost ?? hostOf(cfg.baseUrl);
