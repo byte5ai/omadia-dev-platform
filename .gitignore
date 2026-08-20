@@ -11,3 +11,7 @@ out/
 # packages/ui builds into packages/plugin/ui — build output that happens to
 # live inside a sibling package, and part of the ZIP rather than of the source.
 packages/plugin/ui/
+
+# packages/plugin/bin/ — the bundled operator transcript CLI (`npm run
+# build:cli`). Build output, and deliberately NOT part of the plugin ZIP.
+bin/

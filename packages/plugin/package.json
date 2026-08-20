@@ -18,11 +18,12 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.cli.json",
     "test": "node scripts/test.mjs",
     "package": "node scripts/build-zip.mjs",
     "codegen:migrations": "node scripts/codegen-migrations.mjs",
-    "clean": "rm -rf dist out .test-build *.tsbuildinfo"
+    "clean": "rm -rf dist bin out .test-build *.tsbuildinfo",
+    "build:cli": "node scripts/build-cli.mjs"
   },
   "peerDependencies": {
     "@omadia/dev-platform-plugin-api": "*",
@@ -33,10 +34,12 @@
   },
   "devDependencies": {
     "@omadia/dev-platform-plugin-api": "*",
+    "@omadia/dev-runner-shim": "*",
     "@types/express": "^5.0.0",
     "@types/pg": "^8.15.0",
     "express": "^5.1.0",
     "pg": "^8.16.0",
+    "yaml": "^2.9.0",
     "zod": "^4.1.0"
   },
   "description": "The Omadia Dev Platform as an installable plugin — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core per epic byte5ai/omadia#470 (P3: the middleware tree).",
