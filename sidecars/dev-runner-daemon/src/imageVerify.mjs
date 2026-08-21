@@ -52,34 +52,38 @@ const OFF_VALUES = new Set(['off', 'false', '0', 'no']);
 const ON_VALUES = new Set(['on', 'true', '1', 'yes']);
 
 // ---------------------------------------------------------------------------
-// The certificate-identity transition (epic #470 P4, decision D5).
+// The certificate identity — NARROWED (epic #470 P4, decision D5; 0.3.4).
 //
 // Keyless cosign binds a certificate identity to REPO + WORKFLOW + REF. The
-// runner image used to be published from omadia core and is published from this
-// repository now, so the identity on a freshly signed image is a different
-// string than the one deployed daemons have pinned. An exact
-// `--certificate-identity` match therefore refuses the new image — and a daemon
-// that refuses its runner image refuses every job, at boot, with no config
-// change to point at.
+// runner image used to be published from omadia core, so 0.3.2 shipped a
+// TRANSITION pattern that accepted core's `publish-images.yml` alongside this
+// repository's `release-runner-image.yml` — otherwise the first image published
+// here would have been refused by every daemon that had pinned the old signer,
+// at boot, with no config change to point at.
 //
-// The fix is `--certificate-identity-regexp` with a transition pattern that
-// accepts BOTH signers, and nothing else. It is deliberately narrow: the value
-// of a pinned identity is that a signature from anywhere else is not a
-// signature. Widening it to "anything under byte5ai" would hand every repo in
-// the org authority over what runs a job.
+// 0.3.2 was that first publish. Per the schedule written down in
+// docs/SUPPLY_CHAIN.md — narrow one release after — the core alternative and the
+// automatic widening of a core pin are GONE as of 0.3.4. What remains accepts
+// exactly one repo+workflow, from exactly the refs this repository actually
+// publishes from:
 //
-// NARROWING (docs/SUPPLY_CHAIN.md): one release after the first image is
-// published from this repository, delete the CORE_SIGNER_IDENTITY alternative
-// below and the `widened` branch in `resolveCertificateIdentity`. The suite in
-// test/certificateIdentity.test.mjs is written so that narrowing is a deletion,
-// not a rewrite.
+//   refs/heads/main    every runner-relevant push to main (the `decide` job)
+//   refs/tags/vX.Y.Z   a release tag
+//
+// Both halves are load-bearing and both are narrower than they were. The ref arm
+// is no longer "any branch, any tag": a `workflow_dispatch` from a feature
+// branch signs `@refs/heads/<branch>` and a daemon will now REFUSE that image.
+// That is deliberate — publish from `main` or from a version tag. An image
+// signed off a branch anyone can push is not a pinned provenance path, it is a
+// pattern that happens to contain one.
+//
+// An operator still pinned to core's exact identity falls through to the
+// `operator-exact` path below and fails verification against a newly published
+// image — correctly, loudly, and with a message naming the image. The fix on
+// their side is one environment variable; see docs/SUPPLY_CHAIN.md.
 // ---------------------------------------------------------------------------
 
-/** The OLD signer: omadia core's release workflow, sans `@<ref>`. */
-export const CORE_SIGNER_IDENTITY =
-  'https://github.com/byte5ai/omadia/.github/workflows/publish-images.yml';
-
-/** The NEW signer: this repository's runner-image release workflow, sans `@<ref>`. */
+/** The signer: this repository's runner-image release workflow, sans `@<ref>`. */
 export const PLUGIN_SIGNER_IDENTITY =
   'https://github.com/byte5ai/omadia-dev-platform/.github/workflows/release-runner-image.yml';
 
@@ -89,24 +93,22 @@ function escapeRe(s) {
 }
 
 /**
- * The transition pattern. Anchored at BOTH ends on purpose: cosign compiles this
- * with Go's RE2 and matches it unanchored, so without `^…$` an identity like
+ * The default identity pattern.
+ *
+ * Anchored at BOTH ends on purpose: cosign compiles this with Go's RE2 and
+ * matches it unanchored, so without `^…$` an identity like
  * `https://evil.example/?x=<a valid identity>` satisfies it and the pin is
  * decoration.
  *
- * The ref part accepts `refs/heads/<branch>` and `refs/tags/<tag>`, and both
- * halves are load-bearing: the release workflow signs on a tag, it signs every
- * runner-relevant push to `refs/heads/main`, and its `workflow_dispatch` escape
- * hatch signs from whatever branch it was dispatched on.
- * `[A-Za-z0-9._/-]+` is the git ref charset; notably it excludes the `#` and `?`
- * a URL-smuggling identity would need.
+ * The ref alternation names the two refs the release workflow signs from and
+ * nothing else. `v[0-9]+\.[0-9]+\.[0-9]+` is stricter than the workflow's `v*`
+ * tag trigger, which is the safe direction: a tag outside that shape produces an
+ * image the daemon refuses, and the refusal is visible in the workflow's own
+ * `verify` job before anyone deploys it.
  */
-export const DEFAULT_TRANSITION_IDENTITY_REGEXP =
-  `^(?:${escapeRe(CORE_SIGNER_IDENTITY)}|${escapeRe(PLUGIN_SIGNER_IDENTITY)})` +
-  '@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$';
-
-/** The two signers, for the widening test. */
-const TRANSITION_SIGNERS = [CORE_SIGNER_IDENTITY, PLUGIN_SIGNER_IDENTITY];
+export const DEFAULT_IDENTITY_REGEXP =
+  `^${escapeRe(PLUGIN_SIGNER_IDENTITY)}` +
+  '@refs/(?:heads/main|tags/v[0-9]+\\.[0-9]+\\.[0-9]+)$';
 
 /** @param {string | undefined} raw @returns {string | undefined} Trimmed, or undefined when blank. */
 function nonBlank(raw) {
@@ -119,8 +121,9 @@ function nonBlank(raw) {
  * @typedef {object} CertificateIdentityMatcher
  * @property {'--certificate-identity' | '--certificate-identity-regexp'} flag The cosign flag.
  * @property {string} value The flag's value.
- * @property {'operator-regexp' | 'widened' | 'operator-exact'} source Why this
- *   matcher was chosen. `widened` is the only one that warrants a warning.
+ * @property {'operator-regexp' | 'operator-exact'} source Why this matcher was
+ *   chosen. (`widened` existed for the 0.3.2→0.3.3 transition window and was
+ *   removed with the narrowing in 0.3.4.)
  */
 
 /**
@@ -132,17 +135,16 @@ function nonBlank(raw) {
  *     exactly what they will accept. Validated here rather than deferred to
  *     cosign, so a bad pattern fails at boot naming the variable instead of at
  *     the first verify naming Go's regexp syntax.
- *  2. `identity` (`DEV_IMAGE_COSIGN_IDENTITY`) that IS one of the two transition
- *     signers → WIDENED to the transition regexp. This is the fix: a daemon
- *     pinned to core's workflow keeps running while the publisher moves.
- *  3. Any other `identity` → passed through exactly. Someone who signs their own
- *     fork gets what they asked for; widening it would silently grant byte5ai's
- *     signers authority over a deployment that never asked for it.
- *  4. Neither configured → `null`. The caller SKIPS with a warning, exactly as
- *     before. Making the transition regexp the default here would turn a
- *     documented skip into a hard boot refusal for every locally-built runner
- *     image — a blast radius this change was not asked to take. The default for
- *     the shipped topology lives in `docker-compose.dev-platform.yaml`.
+ *  2. Any `identity` → passed through EXACTLY. Nothing is widened any more: the
+ *     transition window closed in 0.3.4 (see the header). Someone who signs
+ *     their own fork gets what they asked for, and someone still pinned to
+ *     core's old identity gets a refusal naming the image rather than a silent
+ *     grant of authority they never gave.
+ *  3. Neither configured → `null`. The caller SKIPS with a warning. Making
+ *     `DEFAULT_IDENTITY_REGEXP` the default here would turn a documented skip
+ *     into a hard boot refusal for every locally-built runner image — a blast
+ *     radius this was never asked to take. The default for the shipped topology
+ *     lives in `docker-compose.dev-platform.yaml`.
  *
  * @param {{ identity?: string | undefined, identityRegexp?: string | undefined }} cfg
  * @returns {CertificateIdentityMatcher | null}
@@ -171,14 +173,6 @@ export function resolveCertificateIdentity(cfg) {
 
   const identity = nonBlank(cfg.identity);
   if (identity === undefined) return null;
-
-  if (TRANSITION_SIGNERS.some((signer) => identity.startsWith(`${signer}@`))) {
-    return {
-      flag: '--certificate-identity-regexp',
-      value: DEFAULT_TRANSITION_IDENTITY_REGEXP,
-      source: 'widened',
-    };
-  }
 
   return { flag: '--certificate-identity', value: identity, source: 'operator-exact' };
 }
@@ -325,21 +319,9 @@ export async function verifyRunnerImage(deps) {
       '[dev-runner-daemon] image verification is on but no cosign identity/issuer is configured ' +
         '(DEV_IMAGE_COSIGN_IDENTITY / DEV_IMAGE_COSIGN_IDENTITY_REGEXP / DEV_IMAGE_COSIGN_ISSUER) — cannot ' +
         `verify a keyless signature without a pinned identity, so verification of ${image} is SKIPPED. ` +
-        'Set an identity (or the transition regexp) AND the issuer to enforce signatures.',
+        'Set an identity (or DEFAULT_IDENTITY_REGEXP) AND the issuer to enforce signatures.',
     );
     return { verified: false, skipped: true, reason: 'no-identity' };
-  }
-
-  if (matcher.source === 'widened') {
-    // Loud on purpose. A widened pin accepts TWO publishers, and it is supposed
-    // to stop doing that one release from now. Silence is how a transition
-    // becomes permanent.
-    logger.warn?.(
-      `[dev-runner-daemon] the pinned cosign identity is a known dev-platform transition signer, so it was ` +
-        'WIDENED to accept both the old (byte5ai/omadia) and new (byte5ai/omadia-dev-platform) publishers ' +
-        'for this release only. Set DEV_IMAGE_COSIGN_IDENTITY_REGEXP explicitly to control this yourself; ' +
-        'see docs/SUPPLY_CHAIN.md for the narrowing step.',
-    );
   }
 
   const args = [
@@ -393,10 +375,9 @@ export async function verifyConfiguredImages(deps) {
     );
     return { mode, results: [] };
   }
-  // Resolved ONCE, here, for two reasons: a bad
-  // DEV_IMAGE_COSIGN_IDENTITY_REGEXP must fail boot before any image is
-  // verified rather than N images in, and the `widened` warning must be said
-  // once rather than once per configured image.
+  // Resolved ONCE, here: a bad DEV_IMAGE_COSIGN_IDENTITY_REGEXP must fail boot
+  // before any image is verified rather than N images in, naming the variable
+  // instead of the Nth image.
   const matcher = resolveCertificateIdentity({ identity, identityRegexp });
   if (!matcher || !issuer) {
     logger.warn?.(
@@ -414,22 +395,13 @@ export async function verifyConfiguredImages(deps) {
     return { mode, results: [] };
   }
 
-  if (matcher.source === 'widened') {
-    logger.warn?.(
-      '[dev-runner-daemon] the pinned cosign identity is a known dev-platform transition signer, so it was ' +
-        'WIDENED to accept both the old (byte5ai/omadia) and new (byte5ai/omadia-dev-platform) publishers ' +
-        'for this release only. Set DEV_IMAGE_COSIGN_IDENTITY_REGEXP explicitly to control this yourself; ' +
-        'see docs/SUPPLY_CHAIN.md for the narrowing step.',
-    );
-  }
-
   /** @type {VerifyOutcome[]} */
   const results = [];
   for (const image of images) {
-    // Pass the RESOLVED pattern, never the raw identity: re-resolving per image
-    // would re-emit the widening warning, and (worse) a future divergence
+    // Pass the RESOLVED matcher, never the raw config: a future divergence
     // between the two call sites would mean the boot check and the per-image
-    // check enforced different things.
+    // check enforced different things, which is the kind of drift nobody
+    // notices until an image that CI verified is refused on a host.
     results.push(
       await verifyRunnerImage({
         image,

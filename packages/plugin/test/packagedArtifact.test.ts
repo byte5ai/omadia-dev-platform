@@ -16,6 +16,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
+import { collectPayloadProblems, countSourceMigrations } from '../scripts/package-payload.mjs';
+
 const pkgRoot = resolve(process.cwd());
 const outDir = join(pkgRoot, 'out');
 
@@ -144,6 +146,19 @@ void describe('the plugin ZIP', { skip: !stage }, () => {
       entries.some((e) => /^ui\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(e)),
       'the hashed UI bundle is absent — the no-sourcemap assertion is vacuous',
     );
+  });
+
+  void it('satisfies the packaging gate that build-zip.mjs enforces', () => {
+    // `packagePayload.test.ts` drives that gate over synthetic fixtures — good
+    // stage, then one defect at a time. This is the other half: the gate run
+    // against the archive this checkout ACTUALLY staged. Without it the fixtures
+    // could describe a payload shape nobody ships, and every case there would
+    // still pass (issue #11).
+    const problems = collectPayloadProblems({
+      stageDir: stage!,
+      sourceMigrationCount: countSourceMigrations(join(pkgRoot, 'migrations')),
+    }) as string[];
+    assert.deepEqual(problems, [], `the staged archive would be refused:\n${problems.join('\n')}`);
   });
 
   void it('still ships the four things the kernel does need', () => {

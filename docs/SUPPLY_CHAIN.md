@@ -29,87 +29,98 @@ nothing about what `:latest` points at tomorrow.
 
 ---
 
-## The transition (epic #470, decision D5)
+## The certificate identity (epic #470, decision D5)
 
 **A keyless certificate identity is `repo + workflow + ref`.** The runner image
 used to be published by omadia core and is published by this repository now, so
 the identity on a newly signed image is a different string than the one deployed
-daemons have pinned:
+daemons pinned before 0.3.2:
 
 | | Certificate identity |
 |---|---|
-| **Old** | `https://github.com/byte5ai/omadia/.github/workflows/publish-images.yml@refs/tags/vX.Y.Z` |
-| **New** | `https://github.com/byte5ai/omadia-dev-platform/.github/workflows/release-runner-image.yml@refs/tags/vX.Y.Z` |
+| **Retired** | `https://github.com/byte5ai/omadia/.github/workflows/publish-images.yml@refs/tags/vX.Y.Z` |
+| **Current** | `https://github.com/byte5ai/omadia-dev-platform/.github/workflows/release-runner-image.yml@refs/(heads/main\|tags/vX.Y.Z)` |
 
 `verifyRunnerImage` did an **exact** `--certificate-identity` match. Publishing
 the first image from this repository without changing anything else would have
 made every daemon with a pinned identity refuse to launch **any** job — at boot,
-with no configuration change to point at. That is why this support landed
-*before* the first publish, not after it.
+with no configuration change to point at. That is why the transition support
+landed *before* the first publish, not after it.
 
-### The default transition regexp
+**0.3.2 was that first publish, and 0.3.4 closed the window.** The core
+alternative and the automatic widening of a core pin are gone.
+
+### The default regexp
 
 ```
-^(?:https://github\.com/byte5ai/omadia/\.github/workflows/publish-images\.yml|https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml)@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$
+^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$
 ```
 
-Defined once, as `DEFAULT_TRANSITION_IDENTITY_REGEXP` in `imageVerify.mjs`, and
-pinned from both ends: the release workflow re-verifies its own freshly signed
-image with the identical string, and
+Defined once, as `DEFAULT_IDENTITY_REGEXP` in `imageVerify.mjs`, and pinned from
+both ends: the release workflow re-verifies its own freshly signed image with the
+identical string, and
 `sidecars/dev-runner-daemon/test/certificateIdentity.test.mjs` fails if the two
 drift. A signature the consumer would reject is not a signature, and CI is the
 only place to find that out before an operator's daemon refuses to boot.
 
-Two properties are deliberate:
+Three properties are deliberate:
 
 - **Anchored at both ends.** cosign compiles this with Go's RE2 and matches it
   **unanchored**. Without `^…$`, an identity like
   `https://evil.example/?x=<a valid identity>` satisfies it and the pin is
   decoration.
-- **Narrow.** Two exact repo+workflow pairs, not "anything under `byte5ai`".
-  Anyone in the org can add a workflow to a new repository; a pattern that
-  accepted the org would hand every one of them authority over what runs a job.
+- **One repo+workflow.** Not "anything under `byte5ai`", and no longer two
+  alternatives. Anyone in the org can add a workflow to a new repository; a
+  pattern that accepted the org would hand every one of them authority over what
+  runs a job.
+- **Two refs, not every ref.** `refs/heads/main` and `refs/tags/vX.Y.Z` — the
+  refs this workflow actually publishes from. Until 0.3.4 the ref arm was
+  `refs/(heads|tags)/<anything>`, which meant a `workflow_dispatch` from *any*
+  branch minted an accepted identity. It still builds and still pushes; the image
+  it signs off a feature branch is now **refused by every daemon**. Release from
+  `main` or from a version tag.
 
 ### Precedence
 
 | Configuration | cosign flag | Why |
 |---|---|---|
 | `DEV_IMAGE_COSIGN_IDENTITY_REGEXP` set | `--certificate-identity-regexp <yours>` | You said exactly what you accept. Validated at boot — an unanchored or uncompilable pattern is a refusal naming the variable, not a confusing cosign error at the first verify. |
-| `DEV_IMAGE_COSIGN_IDENTITY` set, and it is one of the two signers above | `--certificate-identity-regexp <transition>` | **The fix.** Your pin is widened to accept both publishers, and the daemon says so, loudly, once per boot. |
-| `DEV_IMAGE_COSIGN_IDENTITY` set to anything else | `--certificate-identity <yours>` | Unchanged. Someone signing their own fork gets what they asked for; widening it would grant byte5ai's signers authority over a deployment that never asked for that. |
-| Neither set | *verification skips, with a warning* | Unchanged behaviour. Making the transition regexp the default here would turn a documented skip into a hard boot refusal for everyone running a locally built runner image. The default for the shipped topology lives in `docker-compose.dev-platform.yaml`, where the rest of this deployment's infrastructure config already is. |
+| `DEV_IMAGE_COSIGN_IDENTITY` set | `--certificate-identity <yours>` | Passed through exactly, whoever the signer is. **Nothing is widened any more.** A pin still naming core's `publish-images.yml` will fail against a newly published image — see the migration note below. |
+| Neither set | *verification skips, with a warning* | Unchanged behaviour. Making `DEFAULT_IDENTITY_REGEXP` the default here would turn a documented skip into a hard boot refusal for everyone running a locally built runner image. The default for the shipped topology lives in `docker-compose.dev-platform.yaml`, where the rest of this deployment's infrastructure config already is. |
 
 `DEV_IMAGE_VERIFY=off` disables verification entirely and is the only escape
 hatch. `DEV_IMAGE_COSIGN_ISSUER` must be set in every enforcing configuration —
 a regexp alone is not a pin, because it would accept a certificate from any OIDC
 provider willing to mint that subject.
 
-### ⚠️ The narrowing step — one release after the first publish from this repo
+### ⚠️ If your daemon still pins core's identity
 
-The transition window is open on purpose and must be closed on purpose.
-**One release after the first `omadia-dev-runner` image is published from this
-repository**, every deployment has had a chance to pull an image signed by the
-new identity, and the old alternative stops earning its place.
+Between 0.3.2 and 0.3.3 a pin on either signer was widened for you and the daemon
+said so, loudly, once per boot. From 0.3.4 it is not. A daemon configured with
 
-To narrow, in `sidecars/dev-runner-daemon/src/imageVerify.mjs`:
+```
+DEV_IMAGE_COSIGN_IDENTITY=https://github.com/byte5ai/omadia/.github/workflows/publish-images.yml@refs/tags/vX.Y.Z
+```
 
-1. Delete `CORE_SIGNER_IDENTITY` and its alternative from
-   `DEFAULT_TRANSITION_IDENTITY_REGEXP`, leaving only `PLUGIN_SIGNER_IDENTITY`.
-2. Delete the `widened` branch of `resolveCertificateIdentity` and the
-   `TRANSITION_SIGNERS` constant. An old pinned identity then falls through to
-   the `operator-exact` path and fails verification — correctly, and with a
-   message that names the image.
-3. Update the literal in `release-runner-image.yml` to match.
-4. Update this table and this section.
+will **refuse to start** on an image published from this repository, with an
+`ImageVerificationError` naming the image. The fix is one variable:
 
-The suite is written so that this is a **deletion**, not a rewrite: the cases in
-`certificateIdentity.test.mjs` that assert the OLD signer is accepted are the
-ones to remove, and every other assertion — anchoring, foreign-identity
-rejection, precedence, refusal on a bad signature — survives unchanged.
+```
+DEV_IMAGE_COSIGN_IDENTITY_REGEXP='^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
+DEV_IMAGE_COSIGN_ISSUER=https://token.actions.githubusercontent.com
+```
 
-Until then, a widened pin logs a warning at every boot naming
-`DEV_IMAGE_COSIGN_IDENTITY_REGEXP` and this file. Silence is how a transition
-becomes permanent.
+(unset `DEV_IMAGE_COSIGN_IDENTITY`, or leave it — the regexp takes precedence).
+This is a refusal, not a silent downgrade, and that is the intended shape: the
+alternative was granting a retired publisher standing authority that nobody
+re-confirmed.
+
+The narrowing was a **deletion**, as designed:
+`CORE_SIGNER_IDENTITY`, `TRANSITION_SIGNERS` and the `widened` branch are gone
+from `imageVerify.mjs`, and the suite's cases asserting the old signer is
+*accepted* became cases asserting it is *rejected*. Everything else — anchoring,
+foreign-identity rejection, precedence, refusal on a bad signature — survived
+unchanged.
 
 ---
 
@@ -117,7 +128,7 @@ becomes permanent.
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$' \
+  --certificate-identity-regexp '^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:<digest>
 

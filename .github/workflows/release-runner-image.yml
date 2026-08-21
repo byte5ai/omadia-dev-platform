@@ -38,13 +38,20 @@ name: release-runner-image
 # ## Verify side
 #
 # The daemon runs `cosign verify` against this image at boot
-# (`sidecars/dev-runner-daemon/src/imageVerify.mjs`). Because the signer moved
-# from byte5ai/omadia to this repository, the certificate identity CHANGED — see
-# docs/SUPPLY_CHAIN.md for the transition regexp that accepts both, and for the
-# narrowing step that removes the old one a release later. The `verify` job at
-# the bottom re-checks the published digest with that exact regexp, so a drift
-# between publisher and consumer fails CI here instead of a daemon somewhere
-# else, days later, refusing to boot.
+# (`sidecars/dev-runner-daemon/src/imageVerify.mjs`). The signer moved from
+# byte5ai/omadia to this repository, so 0.3.2 shipped a transition regexp that
+# accepted both publishers; 0.3.4 NARROWED it, on the schedule written down in
+# docs/SUPPLY_CHAIN.md, to this repository's workflow alone and only from
+# `refs/heads/main` or `refs/tags/vX.Y.Z`.
+#
+# Consequence worth knowing before you reach for the escape hatch: a
+# `workflow_dispatch` run from a NON-MAIN branch still builds and still pushes,
+# but the identity it signs (`@refs/heads/<branch>`) is one every daemon now
+# REFUSES. Release from `main` or from a version tag.
+#
+# The `verify` job at the bottom re-checks the published digest with the exact
+# regexp the daemon enforces, so a drift between publisher and consumer fails CI
+# here instead of a daemon somewhere else, days later, refusing to boot.
 
 on:
   push:
@@ -114,8 +121,8 @@ jobs:
           #   sidecars/dev-runner/**        the Dockerfile itself
           #   packages/runner-shim/**       compiled INTO the image
           #   sidecars/dev-runner-daemon/** the consumer of the signature: it
-          #                                 owns DEFAULT_TRANSITION_IDENTITY_REGEXP
-          #                                 and the drift guard against this file
+          #                                 owns DEFAULT_IDENTITY_REGEXP and the
+          #                                 drift guard against this file
           #   this workflow                 how the image is built at all
           #
           # Unknown or unreachable `before` (first push on a branch, force-push,
@@ -374,11 +381,17 @@ jobs:
           IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
           set -euo pipefail
-          # Kept BYTE-IDENTICAL to DEFAULT_TRANSITION_IDENTITY_REGEXP in
+          # Kept BYTE-IDENTICAL to DEFAULT_IDENTITY_REGEXP in
           # sidecars/dev-runner-daemon/src/imageVerify.mjs. The daemon suite pins
           # that constant against this file; this is the other end of the same
           # contract. Change one without the other and this job goes red.
-          IDENTITY_RE='^(?:https://github\.com/byte5ai/omadia/\.github/workflows/publish-images\.yml|https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml)@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$'
+          #
+          # NARROWED in 0.3.4 (docs/SUPPLY_CHAIN.md): one signer, and only the
+          # two refs this workflow publishes from. A `workflow_dispatch` run from
+          # a NON-MAIN branch signs `@refs/heads/<branch>`, which this job — and
+          # every daemon — will refuse. That is the trade the narrowing makes:
+          # release from `main` or from a `vX.Y.Z` tag.
+          IDENTITY_RE='^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$'
           cosign verify \
             --certificate-identity-regexp "$IDENTITY_RE" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \

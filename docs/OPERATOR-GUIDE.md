@@ -427,33 +427,43 @@ drift fails CI rather than a daemon launch.
 > (`gh api -X PATCH /orgs/byte5ai/packages/container/omadia-dev-platform-runner -f visibility=public`).
 > Until then, pulling needs `docker login ghcr.io`.
 
-Because the image was previously published by core, verification accepts either
-signer during the transition:
+Verification accepts exactly one signer, from the two refs this workflow
+publishes from. The transition pattern that also accepted core's
+`publish-images.yml` was **narrowed away in 0.3.4** (see docs/SUPPLY_CHAIN.md):
 
 ```
-^(?:https://github\.com/byte5ai/omadia/\.github/workflows/publish-images\.yml|https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml)@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$
+^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$
 ```
 
-Two deliberate properties. It is **anchored at both ends** — cosign compiles
+Three deliberate properties. It is **anchored at both ends** — cosign compiles
 with Go RE2 and matches *unanchored*, so without `^…$` a URL like
-`https://evil.example/?x=<a valid identity>` would satisfy it. And it is
-**narrow**: two exact repo+workflow pairs, never "anything under `byte5ai`".
+`https://evil.example/?x=<a valid identity>` would satisfy it. It names **one
+exact repo+workflow**, never "anything under `byte5ai`". And it accepts **two
+refs, not every ref**: a `workflow_dispatch` from a non-main branch still builds
+and pushes, but the image it signs carries `@refs/heads/<branch>` and every
+daemon now refuses it — release from `main` or from a `vX.Y.Z` tag.
 
 | Configuration | cosign flag |
 |---|---|
 | `DEV_IMAGE_COSIGN_IDENTITY_REGEXP` set | `--certificate-identity-regexp <yours>` — validated at boot; unanchored or uncompilable is a refusal naming the variable |
-| `DEV_IMAGE_COSIGN_IDENTITY` set to one of the two signers | `--certificate-identity-regexp <transition>` — widened, logged loudly once per boot |
-| `DEV_IMAGE_COSIGN_IDENTITY` set to anything else | `--certificate-identity <yours>` |
+| `DEV_IMAGE_COSIGN_IDENTITY` set | `--certificate-identity <yours>` — passed through exactly; **nothing is widened** since 0.3.4 |
 | Neither set | verification **skips**, with a warning |
 
 `DEV_IMAGE_COSIGN_ISSUER` must be set in any enforcing configuration — a regexp
 alone is not a pin. `DEV_IMAGE_VERIFY=off` is the only full escape hatch.
 
+> **Upgrading past 0.3.3?** A daemon whose `DEV_IMAGE_COSIGN_IDENTITY` still
+> names core's `publish-images.yml` was widened for it automatically in 0.3.2 and
+> 0.3.3. From 0.3.4 it is not, and that daemon will **refuse to start** on a
+> newly published image. Set `DEV_IMAGE_COSIGN_IDENTITY_REGEXP` to the pattern
+> above (it takes precedence over the exact pin) and keep
+> `DEV_IMAGE_COSIGN_ISSUER` set.
+
 Verify by hand:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$' \
+  --certificate-identity-regexp '^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:<digest>
 

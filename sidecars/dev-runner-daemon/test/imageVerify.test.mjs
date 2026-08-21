@@ -25,18 +25,21 @@ import {
 
 const IMAGE = 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:' + '1'.repeat(64);
 /**
- * A pinned identity DELIBERATELY outside the epic #470 P4 transition set.
+ * A pinned identity DELIBERATELY unrelated to this project's own signer.
  *
  * This fixture used to be core's own signer
- * (`byte5ai/omadia/.github/workflows/publish-images.yml@refs/tags/v1.2.3`). Once
- * `resolveCertificateIdentity` learned to WIDEN a pin on either transition
- * signer into `--certificate-identity-regexp`, that fixture stopped exercising
- * the exact-match path this file is about — every argv assertion below would
- * have been silently re-pointed at the regexp branch and this suite would have
- * become a second, weaker copy of `certificateIdentity.test.mjs`.
+ * (`byte5ai/omadia/.github/workflows/publish-images.yml@refs/tags/v1.2.3`). When
+ * `resolveCertificateIdentity` learned (0.3.2) to WIDEN a pin on either
+ * transition signer into `--certificate-identity-regexp`, that fixture stopped
+ * exercising the exact-match path this file is about — every argv assertion
+ * below would have been silently re-pointed at the regexp branch, and this suite
+ * would have become a second, weaker copy of `certificateIdentity.test.mjs`.
  *
- * So: the transition lives in `certificateIdentity.test.mjs`, and THIS file
- * keeps testing the decision core against an identity nothing widens.
+ * The widening is gone as of 0.3.4, so a core pin would work here again. It
+ * stays a third-party fork anyway: the value of this fixture is that it belongs
+ * to NO byte5ai signer set, present or retired, which is what keeps this file
+ * about the decision core rather than about identity policy. Identity policy
+ * lives in `certificateIdentity.test.mjs`.
  */
 const IDENTITY = 'https://github.com/acme/omadia-fork/.github/workflows/sign.yml@refs/tags/v1.2.3';
 const ISSUER = 'https://token.actions.githubusercontent.com';

@@ -9,6 +9,96 @@ project versions the ARTIFACT, not the repository: a release is a ZIP an
 operator can install, so anything that does not change the ZIP does not get a
 version.
 
+## 0.3.4 — 2026-08-21
+
+Two supply-chain fixes with the same shape: a guarantee that had stopped being
+checked, and a window that had stopped being temporary.
+
+### Fixed
+
+- **`npm run package` now gates on a green build**
+  ([#11](https://github.com/byte5ai/omadia-dev-platform/issues/11)). It used to
+  stage whatever `dist/` and `ui/` happened to contain. During the 0.3.1
+  acceptance run that produced `omadia-dev-platform-0.3.1.zip` at **142,081
+  bytes instead of 537,065**, from a `tsc` that had FAILED: `dist/` had been
+  deleted, the stale `*.tsbuildinfo` beside it told the compiler there was
+  nothing to do, and the archive came out with no UI bundle and otherwise
+  indistinguishable from a valid artifact. It uploaded, installed, activated,
+  and 404'd when the operator clicked the nav entry.
+
+  `scripts/build-zip.mjs` now **deletes** the build outputs *and* their
+  `*.tsbuildinfo` (`plugin-api`, `runner-shim`, `plugin`, and the `ui/` that
+  `packages/ui` writes into this package), runs `npm run build` from the
+  repository root, and refuses to package on a non-zero exit. Checking for the
+  presence of `dist/plugin.js` would not have caught the original bug — the file
+  was there, from the previous version.
+
+### Added
+
+- **A payload gate over the staged archive**, in the new
+  `packages/plugin/scripts/package-payload.mjs`. It asserts `dist/plugin.js`,
+  every `migrations/*.js` (counted against the SOURCE directory, floor of nine),
+  `ui/index.html` plus at least one hashed `ui/assets/index-<hash>.js`,
+  `handoff-plan.json`, `manifest.yaml`, `package.json` and the in-ZIP
+  `README.md`; and that no `.map`, `.css`, `node_modules/` or `.tsbuildinfo` is
+  present. Every problem is collected and reported **together** — one broken
+  build should cost one edit-run cycle, not one per missing thing. A size floor
+  (400 KB) and ceiling (2 MB) sit behind that as a backstop for whatever the
+  named assertions did not think of.
+
+  Driven from both ends: `test/packagePayload.test.ts` runs the gate over
+  synthetic stages (good stage, then one defect at a time — `ui/` absent, a
+  `.map` that sneaks past the prune, a short migration set, a staged
+  `node_modules`), and `test/packagedArtifact.test.ts` runs the same gate over
+  the archive the checkout actually staged, so the fixtures cannot drift into
+  describing a payload nobody ships.
+
+- **`README.md` is a REQUIRED payload file**, not an optional one. The hub
+  renders a storefront page from the manifest and links no repository, so an
+  operator inspecting an unzipped plugin has this file or has nothing.
+
+### Changed
+
+- **The cosign certificate identity is NARROWED** (epic #470 P4, decision D5),
+  on the schedule [docs/SUPPLY_CHAIN.md](./docs/SUPPLY_CHAIN.md) wrote down: one
+  release after the first image published from this repository, which was 0.3.2.
+  `CORE_SIGNER_IDENTITY`, `TRANSITION_SIGNERS` and the `widened` branch of
+  `resolveCertificateIdentity` are deleted. The default is now
+
+  ```
+  ^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$
+  ```
+
+  renamed `DEFAULT_TRANSITION_IDENTITY_REGEXP` → `DEFAULT_IDENTITY_REGEXP`,
+  because it is not a transition any more. The `verify` job in
+  `release-runner-image.yml` carries the identical string; the daemon suite fails
+  if the two drift.
+
+  The **ref** arm narrowed too, and this is the part with a consequence: it was
+  `refs/(heads|tags)/<any ref>`, so a `workflow_dispatch` from *any* branch —
+  including one any contributor can push — minted an identity the daemon
+  accepted. It is now `refs/heads/main` or `refs/tags/vX.Y.Z`. A dispatch from a
+  feature branch still builds and still pushes, and the image it signs is
+  **refused by every daemon**. Release from `main` or from a version tag.
+
+  `certificateIdentity.test.mjs` is the counter-proof: the cases that asserted
+  the old signer is *accepted* now assert it is *rejected*, and the widening
+  cases assert nothing is widened.
+
+### ⚠️ Operator action — only if you pinned core's identity
+
+A daemon whose `DEV_IMAGE_COSIGN_IDENTITY` still names
+`byte5ai/omadia/.github/workflows/publish-images.yml` was widened for it
+automatically in 0.3.2 and 0.3.3, with a warning at every boot. From 0.3.4 it is
+not: that daemon will **refuse to start** on a newly published image, with an
+`ImageVerificationError` naming the image. The fix is one variable —
+`DEV_IMAGE_COSIGN_IDENTITY_REGEXP` set to the pattern above, which takes
+precedence over the exact pin. See
+[docs/SUPPLY_CHAIN.md](./docs/SUPPLY_CHAIN.md#%EF%B8%8F-if-your-daemon-still-pins-cores-identity).
+
+A refusal rather than a silent downgrade is the intended shape: the alternative
+was granting a retired publisher standing authority nobody re-confirmed.
+
 ## 0.3.3 — 2026-08-21
 
 Documentation only — no plugin code changed. Core PR

@@ -30,6 +30,21 @@
  * wrapping `<id>-<version>-package/` directory. This matches what the hub has
  * always received from `@omadia/integration-odoo`. The Telegram script nests
  * its payload one level deeper; the two shapes are not interchangeable.
+ *
+ * ## It BUILDS. It does not trust that you did (issue #11)
+ *
+ * This script used to stage whatever `dist/` and `ui/` happened to contain.
+ * During the 0.3.1 acceptance run that produced a 142,081-byte ZIP — against a
+ * healthy 537,065 — from a `tsc` that had FAILED: `dist/` had been deleted, the
+ * stale `*.tsbuildinfo` next to it told the compiler there was nothing to do,
+ * and the archive came out missing the UI bundle and otherwise indistinguishable
+ * from a valid one. It uploaded. It installed. It 404'd.
+ *
+ * So the build is not an assumption here, it is a step: the stale outputs and
+ * their `*.tsbuildinfo` are DELETED, `npm run build` runs from the repository
+ * root, and a non-zero exit stops the packaging. "Assume it was built" and
+ * "check the build info" are the same bug — the second one is just harder to
+ * see.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -46,10 +61,19 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  assertArchiveSize,
+  assertStagedPayload,
+  countSourceMigrations,
+} from './package-payload.mjs';
+
 /** Resolved from this file, not from `process.cwd()`: `npm run package -w
  *  packages/plugin` and a direct `node scripts/build-zip.mjs` must produce the
  *  same archive. */
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/** `packages/plugin` → the workspace root that owns the `build` script. */
+const repoRoot = resolve(pkgRoot, '..', '..');
 
 /** Everything the host needs at runtime. `node_modules` must never be in here.
  *
@@ -67,10 +91,15 @@ const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * installs perfectly and quietly removes the only step that de-risks the
  * upgrade. `ledgerHandoff.test.ts` proves the file agrees with the code, so a
  * missing one here is a packaging bug, not a choice.
+ *
+ * `README.md` moved from optional to REQUIRED with issue #11. It is the only
+ * documentation that travels with the artifact — the hub renders a storefront
+ * page from the manifest and links no repository, so an operator inspecting an
+ * unzipped plugin has this file or has nothing.
  */
-const REQUIRED_FILES = ['manifest.yaml', 'handoff-plan.json'];
+const REQUIRED_FILES = ['manifest.yaml', 'handoff-plan.json', 'README.md'];
 const REQUIRED_DIRS = ['dist', 'migrations', 'ui'];
-const OPTIONAL_FILES = ['README.md', 'LICENSE', 'NOTICE'];
+const OPTIONAL_FILES = ['LICENSE', 'NOTICE'];
 const OPTIONAL_DIRS = ['assets', 'skills'];
 
 /**
@@ -88,19 +117,35 @@ const OPTIONAL_DIRS = ['assets', 'skills'];
  * The directory is produced by `npm run build -w packages/ui`, which the root
  * `build` script runs after the plugin's `tsc`. It is gitignored: it is build
  * output that happens to live inside a sibling package.
+ *
+ * What must be INSIDE it — `index.html` plus at least one hashed bundle, and no
+ * stylesheet — lives in `package-payload.mjs`, with everything else the archive
+ * must and must not contain.
  */
-const UI_DIR = 'ui';
 
-/** The bundle entry. Its absence means `vite build` did not finish. */
-const REQUIRED_IN_UI = ['index.html'];
+/**
+ * Build outputs that must be REGENERATED, never inherited, and the incremental
+ * state that would let `tsc` skip regenerating them.
+ *
+ * Deleting `dist/` alone is what produced the broken 0.3.1 artifact: the
+ * `*.tsbuildinfo` beside it still described the outputs as current, so `tsc`
+ * exited 0 having emitted nothing. Output and build info are one unit — remove
+ * both or neither.
+ *
+ * `packages/plugin/ui` is in the list because it is `packages/ui`'s output
+ * written into this package. A vite run that fails leaves the PREVIOUS bundle
+ * there, which stages, zips and installs, serving whatever the operator's last
+ * successful build happened to contain.
+ */
+const BUILD_OUTPUTS = [
+  'packages/plugin-api/dist',
+  'packages/runner-shim/dist',
+  'packages/plugin/dist',
+  'packages/plugin/ui',
+];
 
-/** The manifest's `lifecycle.entry`. Its absence means `tsc` did not finish. */
-const REQUIRED_IN_DIST = ['plugin.js'];
-
-/** The nine codegen'd migrations, by name. Counted rather than assumed: a
- *  partial codegen produces a directory that exists, passes the check above, and
- *  leaves the plugin a schema short. */
-const REQUIRED_MIGRATION_COUNT = 9;
+/** Where `*.tsbuildinfo` files live, one level up from each output. */
+const BUILD_INFO_DIRS = ['packages/plugin-api', 'packages/runner-shim', 'packages/plugin'];
 
 const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'));
 if (!pkg.name || !pkg.version) {
@@ -138,6 +183,45 @@ if (manifestId !== pkg.name) {
   );
 }
 
+// --- build gate ------------------------------------------------------------
+// Not "was it built?" — BUILD IT. The failure this replaces was a `tsc` that
+// exited non-zero while a stale `*.tsbuildinfo` kept a later, successful-looking
+// `tsc` from emitting anything, and a packaging run that never asked either
+// question. Checking for the presence of `dist/plugin.js` would not have caught
+// it: the file was there, from the previous version.
+//
+// Runs from the REPOSITORY ROOT because build order is a property of the
+// workspace, not of this package: `plugin-api` before `runner-shim` before
+// `plugin` before `ui`, and `ui` writes into `packages/plugin/ui`. Invoking
+// this package's own `tsc` would produce a `dist/` with no bundle beside it.
+{
+  console.log('▶ cleaning stale build outputs');
+  for (const rel of BUILD_OUTPUTS) {
+    rmSync(join(repoRoot, rel), { recursive: true, force: true });
+  }
+  for (const rel of BUILD_INFO_DIRS) {
+    const dir = join(repoRoot, rel);
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (name.endsWith('.tsbuildinfo')) rmSync(join(dir, name), { force: true });
+    }
+  }
+
+  console.log('▶ npm run build (from the repository root)');
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const built = spawnSync(npm, ['run', 'build'], { cwd: repoRoot, stdio: 'inherit' });
+  if (built.error) {
+    throw new Error(`could not run \`${npm} run build\` in ${repoRoot}: ${built.error.message}`);
+  }
+  if (built.status !== 0) {
+    throw new Error(
+      `\`npm run build\` exited ${built.status} — refusing to package. A ZIP cut from a failed ` +
+        'build is not a smaller ZIP, it is a broken one that installs and fails at activation ' +
+        '(issue #11).',
+    );
+  }
+}
+
 // --- stage -----------------------------------------------------------------
 const safeName = pkg.name.replace(/^@/, '').replace(/\//g, '-');
 const outDir = join(pkgRoot, 'out');
@@ -145,9 +229,17 @@ const stageDir = join(outDir, `${safeName}-${pkg.version}-stage`);
 rmSync(stageDir, { recursive: true, force: true });
 mkdirSync(stageDir, { recursive: true });
 
+// A missing required input is NOT thrown here. It is staged as far as it can be
+// and then reported by `assertStagedPayload` below, together with everything
+// else that is wrong — one list, once. Throwing on the first absence turns a
+// broken build into a sequence of edit-run cycles, each revealing one more
+// missing thing (issue #11).
 for (const rel of REQUIRED_FILES) {
   const src = join(pkgRoot, rel);
-  if (!existsSync(src)) throw new Error(`missing required file: ${rel}`);
+  if (!existsSync(src)) {
+    console.log(`  ✗ ${rel} (absent)`);
+    continue;
+  }
   cpSync(src, join(stageDir, rel));
   console.log(`  + ${rel}`);
 }
@@ -155,7 +247,8 @@ for (const rel of REQUIRED_FILES) {
 for (const rel of REQUIRED_DIRS) {
   const src = join(pkgRoot, rel);
   if (!existsSync(src)) {
-    throw new Error(`missing required directory: ${rel} — run \`npm run build\` first`);
+    console.log(`  ✗ ${rel}/ (absent)`);
+    continue;
   }
   cpSync(src, join(stageDir, rel), { recursive: true });
   console.log(`  + ${rel}/`);
@@ -166,64 +259,6 @@ for (const rel of [...OPTIONAL_FILES, ...OPTIONAL_DIRS]) {
   if (!existsSync(src)) continue;
   cpSync(src, join(stageDir, rel), { recursive: true });
   console.log(`  + ${rel}${statSync(src).isDirectory() ? '/' : ''}`);
-}
-
-for (const rel of REQUIRED_IN_DIST) {
-  if (!existsSync(join(stageDir, 'dist', rel))) {
-    throw new Error(`staged dist/ is missing ${rel} — the build artefact is incomplete`);
-  }
-}
-
-// The ZIP extension allowlist has no `.sql` (bug B4), which is why these are
-// `.js` at all. Verify the codegen actually ran AND produced all nine: a ZIP one
-// migration short installs cleanly and breaks at activation.
-const stagedMigrations = readdirSync(join(stageDir, 'migrations')).filter((f) => f.endsWith('.js'));
-if (stagedMigrations.length !== REQUIRED_MIGRATION_COUNT) {
-  throw new Error(
-    `staged migrations/ has ${stagedMigrations.length} .js file(s), expected ${REQUIRED_MIGRATION_COUNT} — ` +
-      'run `npm run codegen:migrations` against a core checkout',
-  );
-}
-if (readdirSync(join(stageDir, 'migrations')).some((f) => f.endsWith('.sql'))) {
-  throw new Error(
-    'staged migrations/ contains a .sql file — `.sql` is NOT in the ZIP extension allowlist ' +
-      '(zipExtractor.ts), so it would be silently dropped on install',
-  );
-}
-console.log(`  + migrations/ verified (${stagedMigrations.length} codegen'd + checksums.json)`);
-
-// --- ui/ sanity -----------------------------------------------------------
-// Two properties the archive must have, checked here because both fail
-// SILENTLY at runtime and neither is visible in a directory listing.
-{
-  const uiRoot = join(stageDir, UI_DIR);
-  for (const rel of REQUIRED_IN_UI) {
-    if (!existsSync(join(uiRoot, rel))) {
-      throw new Error(
-        `ui/${rel} is missing — run \`npm run build -w packages/ui\` before packaging`,
-      );
-    }
-  }
-
-  // No stylesheet, ever. `.css` is absent from the ZIP extension allowlist,
-  // so a bundle that emitted one is rejected at ingest with
-  // `zip.forbidden_extension` — after upload, by someone else, with a message
-  // that does not name this build. Catching it here names it.
-  const offenders = [];
-  const scan = (dir, prefix) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) scan(join(dir, entry.name), rel);
-      else if (entry.name.toLowerCase().endsWith('.css')) offenders.push(rel);
-    }
-  };
-  scan(uiRoot, '');
-  if (offenders.length > 0) {
-    throw new Error(
-      `ui/ contains ${offenders.length} stylesheet(s) — ${offenders.join(', ')}. ` +
-        'Plugins ship no CSS; the bundle links the sheet core serves. See packages/ui/vocabulary/README.md.',
-    );
-  }
 }
 
 // --- sourcemaps ------------------------------------------------------------
@@ -279,12 +314,34 @@ writeFileSync(
 );
 console.log('  + package.json (devDependencies + scripts stripped)');
 
+// --- the payload gate ------------------------------------------------------
+// Runs LAST over the finished stage, on purpose: after the sourcemap prune, so
+// it guards the prune rather than duplicating it, and after the package.json
+// rewrite, so what it inspects is byte-for-byte what the ZIP will carry.
+//
+// Reports EVERY problem at once (issue #11). The migration count is compared
+// against the SOURCE directory rather than a constant — a migration added and
+// never codegen'd is drift a hard-coded nine cannot see.
+{
+  const { entries } = assertStagedPayload({
+    stageDir,
+    sourceMigrationCount: countSourceMigrations(join(pkgRoot, 'migrations')),
+  });
+  console.log(`✓ payload verified (${entries.length} file(s) staged)`);
+}
+
 // --- zip -------------------------------------------------------------------
 const zipPath = join(outDir, `${safeName}-${pkg.version}.zip`);
 rmSync(zipPath, { force: true });
 createFlatZip({ zipPath, stageDir });
 
-console.log(`✓ built ${zipPath} (${statSync(zipPath).size} bytes)`);
+// The backstop. Everything above names what is missing; a size can only say
+// that something is — which is exactly the signal that was available, and
+// ignored, when 0.3.1 came out at 142,081 bytes against a healthy 537,065.
+const zipBytes = statSync(zipPath).size;
+assertArchiveSize({ bytes: zipBytes, zipPath });
+
+console.log(`✓ built ${zipPath} (${zipBytes} bytes)`);
 
 /**
  * Archive the CONTENTS of `stageDir` at the archive root, using whichever
