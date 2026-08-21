@@ -32,7 +32,7 @@ import { createDockerEngine } from '../src/jobs.mjs';
 
 const JOB_ID = '22222222-2222-4222-8222-222222222222';
 const DIGEST = `sha256:${'3'.repeat(64)}`;
-const IMAGE = `ghcr.io/byte5ai/omadia-dev-runner@${DIGEST}`;
+const IMAGE = `ghcr.io/byte5ai/omadia-dev-platform-runner@${DIGEST}`;
 const LEASE = '2026-07-11T12:00:00.000Z';
 
 /** @returns {import('../src/policyClient.mjs').DerivedJobPolicy} */

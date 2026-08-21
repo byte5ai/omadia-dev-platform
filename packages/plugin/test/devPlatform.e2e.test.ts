@@ -131,7 +131,7 @@ const E2E_DAEMON_TOKEN = 'e2e-daemon-secret-token-0123456789abcdef';
 /** The retiring half of a rotation: DEV_RUNNER_DAEMON_TOKEN is a comma list so a
  *  token can be replaced with zero downtime, and BOTH ends must accept both. */
 const E2E_DAEMON_TOKEN_OLD = 'e2e-daemon-secret-token-fedcba9876543210';
-const E2E_RUNNER_IMAGE = 'ghcr.io/byte5ai/omadia-dev-runner@sha256:e2e';
+const E2E_RUNNER_IMAGE = 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:e2e';
 const E2E_PROVIDER_KEY = 'sk-ant-e2e-REAL-PROVIDER-KEY';
 const E2E_MODEL = 'claude-opus-4-8';
 // #470 P3: core's migrations no longer sit two directories up — they live in
@@ -691,7 +691,7 @@ describe('devplatform — docker rehydration after a middleware restart (pg)', {
         // the persisted handle, and we stop the backend before its renew loop ticks.
         daemonUrl: 'http://127.0.0.1:1',
         daemonToken: 'tok',
-        runnerImage: 'ghcr.io/byte5ai/omadia-dev-runner@sha256:' + 'a'.repeat(64),
+        runnerImage: 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:' + 'a'.repeat(64),
       }),
       shimEntry: '/dev/null',
       log: (m) => logs.push(m),

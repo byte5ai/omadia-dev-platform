@@ -26,7 +26,7 @@ import { FakeStore, makeJob, auth, hasCredentialKey } from './devRunnerApi.harne
 const CONFIG: DeriveJobPolicyConfig = {
   middlewareHost: 'middleware',
   baseAllowlist: ['registry.npmjs.org'],
-  image: 'ghcr.io/byte5ai/omadia-dev-runner@sha256:deadbeef',
+  image: 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:deadbeef',
   llmProxyBaseUrl: 'http://middleware:8080/api/v1/dev-runner/llm',
 };
 

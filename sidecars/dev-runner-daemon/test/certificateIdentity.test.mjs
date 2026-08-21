@@ -30,7 +30,7 @@ import {
   verifyRunnerImage,
 } from '../src/imageVerify.mjs';
 
-const IMAGE = 'ghcr.io/byte5ai/omadia-dev-runner@sha256:' + '1'.repeat(64);
+const IMAGE = 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:' + '1'.repeat(64);
 const ISSUER = 'https://token.actions.githubusercontent.com';
 
 /** A cosign exec fake: records argv, returns `code`. */
@@ -374,5 +374,52 @@ describe('the release workflow and the daemon agree', () => {
     // trust one.
     assert.match(workflow, /cosign sign --yes "\$IMAGE_DIGEST"/);
     assert.match(workflow, /IMAGE_DIGEST:\s*\$\{\{\s*env\.IMAGE\s*\}\}@\$\{\{\s*steps\.build\.outputs\.digest\s*\}\}/);
+  });
+
+  it('publishes a package THIS repository owns by construction', () => {
+    // The predecessor name, `ghcr.io/byte5ai/omadia-dev-runner`, was a package
+    // created by — and therefore owned by — `byte5ai/omadia`. GitHub scopes a
+    // container package to its creating repository, so `packages: write` here
+    // was necessary and not sufficient: the push also needed a grant on that
+    // package that nobody ever made, and the image was never built once.
+    //
+    // A package named after THIS repository is created by this repository's
+    // first push, with write access already held. That is what makes the build
+    // automatic. Reverting the name would not fail loudly — it would 403 at the
+    // push step, on a workflow nobody watches, forever.
+    const image = /^\s*IMAGE:\s*(\S+)\s*$/m.exec(workflow)?.[1];
+    assert.ok(image, 'the workflow declares no IMAGE');
+    assert.equal(image, 'ghcr.io/byte5ai/omadia-dev-platform-runner');
+  });
+
+  it('signs only from refs the default regexp accepts', () => {
+    // The workflow publishes automatically: a `v*` tag, and every
+    // runner-relevant push to `main`. Each of those produces a DIFFERENT
+    // certificate identity, and every one of them has to satisfy the pattern
+    // the daemon enforces — otherwise the publish succeeds, CI goes green, and
+    // the first daemon to pull the image refuses to boot.
+    //
+    // A branch push signs from `refs/heads/main`, which is exactly why the ref
+    // alternation in DEFAULT_TRANSITION_IDENTITY_REGEXP has a `heads` arm.
+    // Delete it while narrowing and this test says so.
+    const re = new RegExp(DEFAULT_TRANSITION_IDENTITY_REGEXP);
+    for (const ref of ['refs/heads/main', 'refs/tags/v0.3.2', 'refs/tags/v1.10.0']) {
+      assert.ok(
+        re.test(`${PLUGIN_SIGNER_IDENTITY}@${ref}`),
+        `${ref} is a ref this workflow signs from, and the daemon would reject it`,
+      );
+    }
+
+    // …and the triggers really are the ones just asserted about.
+    assert.match(workflow, /^\s*branches:\s*$\n\s*-\s*main\s*$/m);
+    assert.match(workflow, /^\s*tags:\s*$\n\s*-\s*'v\*'\s*$/m);
+  });
+
+  it('grants the attestation permission the provenance step needs', () => {
+    // `actions/attest-build-provenance` fails at the END of a publish without
+    // it — after the image is already pushed, leaving a published digest with
+    // no provenance and a red run that looks like a build failure.
+    assert.match(workflow, /^\s{2}attestations:\s*write\s*$/m);
+    assert.match(workflow, /uses:\s*actions\/attest-build-provenance/);
   });
 });

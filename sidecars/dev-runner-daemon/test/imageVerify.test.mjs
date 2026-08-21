@@ -23,7 +23,7 @@ import {
   verifyRunnerImage,
 } from '../src/imageVerify.mjs';
 
-const IMAGE = 'ghcr.io/byte5ai/omadia-dev-runner@sha256:' + '1'.repeat(64);
+const IMAGE = 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:' + '1'.repeat(64);
 /**
  * A pinned identity DELIBERATELY outside the epic #470 P4 transition set.
  *

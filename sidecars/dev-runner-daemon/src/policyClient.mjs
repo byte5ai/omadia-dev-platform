@@ -297,7 +297,7 @@ export class PolicyLookupError extends Error {
 
 /**
  * Parse `DEV_RUNNER_ALLOWED_IMAGES` — a comma-separated list of BARE image
- * repositories (e.g. `ghcr.io/byte5ai/omadia-dev-runner`). Trims, drops empties,
+ * repositories (e.g. `ghcr.io/byte5ai/omadia-dev-platform-runner`). Trims, drops empties,
  * and rejects any entry that carries a tag or digest (an allowlist entry names a
  * repository, not a specific version). Throws `PolicyConfigError` when the result
  * is empty — the daemon must not run without an image allowlist.

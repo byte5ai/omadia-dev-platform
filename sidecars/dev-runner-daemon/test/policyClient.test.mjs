@@ -27,7 +27,7 @@ import {
   PolicyLookupError,
 } from '../src/policyClient.mjs';
 
-const REPO = 'ghcr.io/byte5ai/omadia-dev-runner';
+const REPO = 'ghcr.io/byte5ai/omadia-dev-platform-runner';
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 

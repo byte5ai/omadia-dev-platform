@@ -224,8 +224,13 @@ middleware restarts. Bump the version instead.
 
 ## Supply chain
 
-The runner image is `ghcr.io/byte5ai/omadia-dev-runner`, published only on a tag
-push, signed keyless over the immutable digest, and verified at daemon boot.
+The runner image is `ghcr.io/byte5ai/omadia-dev-platform-runner`, published
+**automatically** — on every runner-relevant push to `main` (`:main`,
+`:sha-<short>`) and on every `v*` tag (`:<version>`, `:latest`) — signed keyless
+over the immutable digest, and verified at daemon boot. The package is named
+after this repository on purpose: GitHub creates it for the repository that
+first pushes it, so publishing needs no cross-repository grant.
+
 During the transition from core's publisher the identity regexp accepts either
 signer — anchored at both ends, because cosign matches unanchored. Details and
 the narrowing step: [`docs/SUPPLY_CHAIN.md`](./docs/SUPPLY_CHAIN.md).

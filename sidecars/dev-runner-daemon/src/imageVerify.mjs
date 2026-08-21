@@ -1,7 +1,7 @@
 /**
  * Epic #470 W5 — runner image signature verification at boot (spec §10).
  *
- * The runner image (`ghcr.io/byte5ai/omadia-dev-runner`) is SIGNED in CI with
+ * The runner image (`ghcr.io/byte5ai/omadia-dev-platform-runner`) is SIGNED in CI with
  * keyless cosign (the release workflow's GitHub OIDC identity — no key material)
  * and carries an SBOM attestation. This unit is the CONSUMER side of that
  * guarantee: before the daemon will run a job, it runs `cosign verify` against
@@ -94,10 +94,12 @@ function escapeRe(s) {
  * `https://evil.example/?x=<a valid identity>` satisfies it and the pin is
  * decoration.
  *
- * The ref part accepts `refs/heads/<branch>` and `refs/tags/<tag>` — the release
- * workflow signs on a tag, and its `workflow_dispatch` escape hatch signs from a
- * branch. `[A-Za-z0-9._/-]+` is the git ref charset; notably it excludes the
- * `#` and `?` a URL-smuggling identity would need.
+ * The ref part accepts `refs/heads/<branch>` and `refs/tags/<tag>`, and both
+ * halves are load-bearing: the release workflow signs on a tag, it signs every
+ * runner-relevant push to `refs/heads/main`, and its `workflow_dispatch` escape
+ * hatch signs from whatever branch it was dispatched on.
+ * `[A-Za-z0-9._/-]+` is the git ref charset; notably it excludes the `#` and `?`
+ * a URL-smuggling identity would need.
  */
 export const DEFAULT_TRANSITION_IDENTITY_REGEXP =
   `^(?:${escapeRe(CORE_SIGNER_IDENTITY)}|${escapeRe(PLUGIN_SIGNER_IDENTITY)})` +

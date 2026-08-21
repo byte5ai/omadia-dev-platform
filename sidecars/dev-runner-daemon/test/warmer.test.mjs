@@ -23,7 +23,7 @@ import { describe, it } from 'node:test';
 
 import { createImageWarmer, DEFAULT_WARM_INTERVAL_MS } from '../src/warmer.mjs';
 
-const REFS = ['ghcr.io/byte5ai/omadia-dev-runner:latest'];
+const REFS = ['ghcr.io/byte5ai/omadia-dev-platform-runner:latest'];
 const DIGEST = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 /** A promise plus its resolve/reject handles, for hand-driven pulls. */

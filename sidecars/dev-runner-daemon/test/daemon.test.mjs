@@ -38,7 +38,7 @@ const JOB_ID_2 = '22222222-2222-4222-8222-222222222222';
 function samplePolicy(jobId = JOB_ID) {
   return {
     jobId,
-    image: 'ghcr.io/byte5ai/omadia-dev-runner@sha256:abc',
+    image: 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:abc',
     env: { ANTHROPIC_BASE_URL: 'http://middleware:8080/api/v1/dev-runner/llm' },
     egressAllowlist: ['github.com', 'registry.npmjs.org'],
   };
@@ -73,7 +73,7 @@ function fakeEngine(overrides = {}) {
     },
     async warmImages() {
       calls.warm += 1;
-      return ['ghcr.io/byte5ai/omadia-dev-runner@sha256:abc'];
+      return ['ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:abc'];
     },
     ...overrides,
   };
@@ -102,7 +102,7 @@ async function startDaemon(opts = {}) {
     policyClient,
     jobManager,
     engine,
-    warmImageRefs: opts.warmImageRefs ?? ['ghcr.io/byte5ai/omadia-dev-runner:latest'],
+    warmImageRefs: opts.warmImageRefs ?? ['ghcr.io/byte5ai/omadia-dev-platform-runner:latest'],
     warmer: opts.warmer,
     maxLogFollows: opts.maxLogFollows,
     logger: { warn() {} },

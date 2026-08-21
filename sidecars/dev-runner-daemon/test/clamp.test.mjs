@@ -21,7 +21,7 @@ import {
 
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 const DIGEST = 'sha256:1111111111111111111111111111111111111111111111111111111111111111';
-const IMAGE = `ghcr.io/byte5ai/omadia-dev-runner@${DIGEST}`;
+const IMAGE = `ghcr.io/byte5ai/omadia-dev-platform-runner@${DIGEST}`;
 const LEASE = '2026-07-10T12:00:00.000Z';
 
 /** @returns {import('../src/policyClient.mjs').DerivedJobPolicy} */
@@ -162,7 +162,7 @@ describe('buildContainerCreateOptions — env passes through as the already-clam
 describe('buildContainerCreateOptions — a forbidden image fails with spec_rejected, never launches', () => {
   it('rejects a floating tag (no digest) with a spec_rejected-shaped error', () => {
     assert.throws(
-      () => build({ policy: policy({ image: 'ghcr.io/byte5ai/omadia-dev-runner:latest' }) }),
+      () => build({ policy: policy({ image: 'ghcr.io/byte5ai/omadia-dev-platform-runner:latest' }) }),
       (err) => {
         assert.ok(err instanceof SpecRejectedError);
         assert.equal(err.code, 'daemon.spec_rejected');
