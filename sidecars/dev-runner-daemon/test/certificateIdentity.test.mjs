@@ -1,20 +1,22 @@
 /**
- * Epic #470 P4 / decision D5 — the cosign certificate-identity TRANSITION.
+ * Epic #470 P4 / decision D5 — the cosign certificate identity, NARROWED (0.3.4).
  *
  * Keyless cosign binds a signature's certificate identity to repo + workflow +
  * ref. The dev-platform runner image used to be signed by
  * `byte5ai/omadia/.github/workflows/publish-images.yml`; from this repo it is
  * signed by `byte5ai/omadia-dev-platform/.github/workflows/release-runner-image.yml`.
- * `verifyRunnerImage` did an EXACT `--certificate-identity` match, so the first
- * image published from the new repo would have been refused by every deployed
- * daemon that had pinned the old one — and a daemon that refuses its runner
- * image refuses every job.
+ * 0.3.2 shipped a TRANSITION pattern accepting both, so that the first image
+ * published here would not be refused by every daemon pinned to the old signer.
  *
- * This suite pins the fix and, just as importantly, its BOUNDS. A transition
- * regexp that accepts both signers is only safe while it accepts *nothing else*:
- * the whole value of a pinned identity is that a signature from some other repo
- * is not a signature at all. So the cases below are as much about what must
- * still be rejected as about what must now pass.
+ * 0.3.2 was that first publish. Per the schedule in docs/SUPPLY_CHAIN.md — narrow
+ * one release after — the core alternative and the automatic widening of a core
+ * pin are gone. This suite is now the COUNTER-PROOF: the cases that used to
+ * assert the old signer is accepted assert that it is rejected, and the widening
+ * cases assert that nothing is widened.
+ *
+ * The bounds matter as much as the acceptance. A pinned identity is only worth
+ * something while a signature from anywhere else is not a signature at all — and
+ * "anywhere else" now includes the publisher this project used a release ago.
  */
 
 import { strict as assert } from 'node:assert';
@@ -23,8 +25,7 @@ import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
-  CORE_SIGNER_IDENTITY,
-  DEFAULT_TRANSITION_IDENTITY_REGEXP,
+  DEFAULT_IDENTITY_REGEXP,
   PLUGIN_SIGNER_IDENTITY,
   resolveCertificateIdentity,
   verifyRunnerImage,
@@ -32,6 +33,17 @@ import {
 
 const IMAGE = 'ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:' + '1'.repeat(64);
 const ISSUER = 'https://token.actions.githubusercontent.com';
+
+/**
+ * The signer this project used until 0.3.2, kept as a LOCAL literal.
+ *
+ * It is deliberately not imported: `CORE_SIGNER_IDENTITY` no longer exists in
+ * `imageVerify.mjs`, and re-exporting it just to test against it would leave the
+ * old identity present in shipped code — one edit away from being wired back
+ * into the pattern. Here it is test data, which is what it is now.
+ */
+const RETIRED_CORE_SIGNER =
+  'https://github.com/byte5ai/omadia/.github/workflows/publish-images.yml';
 
 /** A cosign exec fake: records argv, returns `code`. */
 function fakeExec(code = 0) {
@@ -55,34 +67,43 @@ function fakeLogger() {
 // The regexp itself.
 // ---------------------------------------------------------------------------
 
-describe('DEFAULT_TRANSITION_IDENTITY_REGEXP — what it accepts', () => {
-  const re = new RegExp(DEFAULT_TRANSITION_IDENTITY_REGEXP);
+describe('DEFAULT_IDENTITY_REGEXP — what it accepts', () => {
+  const re = new RegExp(DEFAULT_IDENTITY_REGEXP);
 
   it('is anchored at both ends', () => {
     // cosign compiles this with Go's RE2 and matches it UNANCHORED. Without the
     // anchors, `https://evil.example/?x=<the whole valid identity>#` matches,
     // and the pin is decoration.
-    assert.ok(DEFAULT_TRANSITION_IDENTITY_REGEXP.startsWith('^'));
-    assert.ok(DEFAULT_TRANSITION_IDENTITY_REGEXP.endsWith('$'));
+    assert.ok(DEFAULT_IDENTITY_REGEXP.startsWith('^'));
+    assert.ok(DEFAULT_IDENTITY_REGEXP.endsWith('$'));
   });
 
-  it('accepts the OLD core signer at a release tag', () => {
-    assert.match(`${CORE_SIGNER_IDENTITY}@refs/tags/v1.2.3`, re);
+  it('accepts the dev-platform signer at a release tag', () => {
+    assert.match(`${PLUGIN_SIGNER_IDENTITY}@refs/tags/v0.3.4`, re);
+    assert.match(`${PLUGIN_SIGNER_IDENTITY}@refs/tags/v1.10.0`, re);
   });
 
-  it('accepts the NEW dev-platform signer at a release tag', () => {
-    assert.match(`${PLUGIN_SIGNER_IDENTITY}@refs/tags/v0.3.0`, re);
-  });
-
-  it('accepts both signers on a branch ref too', () => {
-    // `release-runner-image.yml` also runs on workflow_dispatch from a branch,
-    // which mints `@refs/heads/<branch>`. Refusing that would make every
-    // manually-published image unverifiable.
-    assert.match(`${CORE_SIGNER_IDENTITY}@refs/heads/main`, re);
+  it('accepts the dev-platform signer on refs/heads/main', () => {
+    // The workflow publishes on every runner-relevant push to main, and those
+    // images are what an operator running `:main` actually pulls. Refusing this
+    // ref would make the automatic build unverifiable — the exact failure the
+    // workflow's own `verify` job exists to catch before a daemon does.
     assert.match(`${PLUGIN_SIGNER_IDENTITY}@refs/heads/main`, re);
   });
 
+  it('REJECTS the retired core signer — the counter-proof for the narrowing', () => {
+    // This is the assertion that changed direction in 0.3.4. Until this release
+    // both of these matched. An image still signed only by core is now refused,
+    // which is the whole point of narrowing: the transition window is a window,
+    // not a permanent second door.
+    assert.doesNotMatch(`${RETIRED_CORE_SIGNER}@refs/tags/v1.2.3`, re);
+    assert.doesNotMatch(`${RETIRED_CORE_SIGNER}@refs/heads/main`, re);
+  });
+
   for (const foreign of [
+    // The retired publisher, spelled every way it ever appeared.
+    `${RETIRED_CORE_SIGNER}@refs/tags/v0.3.1`,
+    `${RETIRED_CORE_SIGNER}@refs/heads/main`,
     // A different org entirely.
     'https://github.com/evil/omadia/.github/workflows/publish-images.yml@refs/tags/v1.0.0',
     // Same org, a repo nobody granted signing rights to. This is the one that
@@ -90,11 +111,18 @@ describe('DEFAULT_TRANSITION_IDENTITY_REGEXP — what it accepts', () => {
     'https://github.com/byte5ai/omadia-homepage/.github/workflows/release-runner-image.yml@refs/tags/v1.0.0',
     // Right repo, WRONG workflow — a workflow a PR could add.
     'https://github.com/byte5ai/omadia-dev-platform/.github/workflows/evil.yml@refs/tags/v1.0.0',
-    // Prefix smuggling against an unanchored matcher. (There is no meaningful
-    // SUFFIX case: everything after `@refs/tags/` is a git ref inside the
-    // correct repo, and only someone who can already push a tag there can
-    // influence it. `.` stays in the ref charset because `v1.2.3` needs it.)
-    `https://evil.example/${CORE_SIGNER_IDENTITY}@refs/tags/v1.0.0`,
+    // Right repo, right workflow, WRONG BRANCH. New in 0.3.4: the ref arm used
+    // to be `heads/<anything>`, which meant a `workflow_dispatch` from any
+    // branch — including one any contributor can push — minted an identity the
+    // daemon accepted. Publishing now happens from `main` or a version tag.
+    `${PLUGIN_SIGNER_IDENTITY}@refs/heads/feature/evil`,
+    `${PLUGIN_SIGNER_IDENTITY}@refs/heads/mainly`,
+    // Right repo, right workflow, a tag outside the version shape.
+    `${PLUGIN_SIGNER_IDENTITY}@refs/tags/latest`,
+    `${PLUGIN_SIGNER_IDENTITY}@refs/tags/v1.2`,
+    `${PLUGIN_SIGNER_IDENTITY}@refs/tags/edge`,
+    // Prefix smuggling against an unanchored matcher.
+    `https://evil.example/${PLUGIN_SIGNER_IDENTITY}@refs/tags/v1.0.0`,
     `${PLUGIN_SIGNER_IDENTITY}@refs/tags/v1.0.0#@evil.example`,
     // A repo whose NAME merely starts with the granted one.
     'https://github.com/byte5ai/omadia-dev-platform-evil/.github/workflows/release-runner-image.yml@refs/tags/v1.0.0',
@@ -103,10 +131,20 @@ describe('DEFAULT_TRANSITION_IDENTITY_REGEXP — what it accepts', () => {
     // An email-shaped identity (the other thing Fulcio puts in a SAN).
     'attacker@example.com',
   ]) {
-    it(`rejects a foreign identity: ${foreign.slice(0, 72)}`, () => {
+    it(`rejects: ${foreign.slice(0, 78)}`, () => {
       assert.doesNotMatch(foreign, re);
     });
   }
+
+  it('names exactly one repo+workflow — no alternation left to hide in', () => {
+    // Mutation guard on the narrowing itself. A future edit that re-adds an
+    // alternative signer (or reaches for "anything under byte5ai") would keep
+    // every acceptance case above green.
+    assert.equal(DEFAULT_IDENTITY_REGEXP.includes('byte5ai/omadia/'), false);
+    assert.equal(DEFAULT_IDENTITY_REGEXP.includes('publish-images'), false);
+    const signerOccurrences = DEFAULT_IDENTITY_REGEXP.split('github\\.com').length - 1;
+    assert.equal(signerOccurrences, 1, 'the pattern names more than one host+repo');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -115,11 +153,11 @@ describe('DEFAULT_TRANSITION_IDENTITY_REGEXP — what it accepts', () => {
 
 describe('resolveCertificateIdentity — flag selection', () => {
   it('with NOTHING configured, resolves to nothing — the skip is preserved', () => {
-    // DELIBERATE. It is tempting to make the transition regexp the default and
+    // DELIBERATE. It is tempting to make DEFAULT_IDENTITY_REGEXP the default and
     // have a bare daemon verify out of the box. That would turn a documented
     // SKIP into a hard boot REFUSAL for everyone running a locally-built runner
-    // image, which is a blast radius P4 was not asked to take and which arrives
-    // as "the daemon stopped starting" with no config change to point at.
+    // image, and it arrives as "the daemon stopped starting" with no config
+    // change to point at.
     //
     // The default lives in `docker-compose.dev-platform.yaml` instead, where
     // the rest of this deployment's infrastructure config already lives and
@@ -136,40 +174,56 @@ describe('resolveCertificateIdentity — flag selection', () => {
 
   it('an explicit regexp wins even when an exact identity is also set', () => {
     const out = resolveCertificateIdentity({
-      identity: `${CORE_SIGNER_IDENTITY}@refs/tags/v1.2.3`,
+      identity: `${PLUGIN_SIGNER_IDENTITY}@refs/tags/v1.2.3`,
       identityRegexp: '^https://example\\.test/x$',
     });
     assert.equal(out.value, '^https://example\\.test/x$');
     assert.equal(out.source, 'operator-regexp');
   });
 
-  it('WIDENS a pinned identity that is one of the two transition signers', () => {
-    // THE FIX. A daemon deployed before this release has core's identity pinned
-    // in its config; the next image it is asked to run is signed by this repo.
-    // Widening to the transition regexp is what keeps that daemon running jobs.
-    const out = resolveCertificateIdentity({ identity: `${CORE_SIGNER_IDENTITY}@refs/tags/v1.2.3` });
-    assert.equal(out.flag, '--certificate-identity-regexp');
-    assert.equal(out.value, DEFAULT_TRANSITION_IDENTITY_REGEXP);
-    assert.equal(out.source, 'widened');
+  it('does NOT widen a stale core pin any more — it is passed through exactly', () => {
+    // The narrowing, at the resolution layer. Until 0.3.4 this returned the
+    // transition regexp with `source: 'widened'`. An operator who never updated
+    // their config now gets exactly what they configured: a pin on a publisher
+    // that no longer signs anything, which fails against a newly published image
+    // with a message naming the image. That is the intended end state — a silent
+    // grant of authority nobody re-confirmed would be worse.
+    const pin = `${RETIRED_CORE_SIGNER}@refs/tags/v1.2.3`;
+    const out = resolveCertificateIdentity({ identity: pin });
+    assert.equal(out.flag, '--certificate-identity');
+    assert.equal(out.value, pin);
+    assert.equal(out.source, 'operator-exact');
   });
 
-  it('widens the NEW signer as well, so the window is symmetric', () => {
-    // An operator who already pinned the new identity must still accept an
-    // older, core-signed image they have not upgraded past.
-    const out = resolveCertificateIdentity({ identity: `${PLUGIN_SIGNER_IDENTITY}@refs/heads/main` });
-    assert.equal(out.value, DEFAULT_TRANSITION_IDENTITY_REGEXP);
-    assert.equal(out.source, 'widened');
+  it('does not widen the NEW signer either — no pin is rewritten', () => {
+    // Symmetry check. `widened` is gone as a concept, not merely as a branch for
+    // one of the two signers.
+    const pin = `${PLUGIN_SIGNER_IDENTITY}@refs/heads/main`;
+    const out = resolveCertificateIdentity({ identity: pin });
+    assert.equal(out.flag, '--certificate-identity');
+    assert.equal(out.value, pin);
+    assert.equal(out.source, 'operator-exact');
   });
 
-  it('NEVER widens an identity outside the transition set', () => {
+  it('passes an out-of-set pin through unchanged, as it always did', () => {
     // An operator who signs their own fork gets exactly what they asked for.
-    // Widening it would silently hand byte5ai's signers authority over a
-    // deployment that deliberately did not grant it.
     const own = 'https://github.com/acme/omadia-fork/.github/workflows/sign.yml@refs/tags/v9';
     const out = resolveCertificateIdentity({ identity: own });
     assert.equal(out.flag, '--certificate-identity');
     assert.equal(out.value, own);
     assert.equal(out.source, 'operator-exact');
+  });
+
+  it('never reports a `widened` source for any input', () => {
+    // The mutation guard for the removal. Reinstating the branch would make the
+    // three cases above fail individually; this one states the invariant.
+    for (const identity of [
+      `${RETIRED_CORE_SIGNER}@refs/tags/v1.2.3`,
+      `${PLUGIN_SIGNER_IDENTITY}@refs/heads/main`,
+      'https://github.com/acme/f/.github/workflows/s.yml@refs/tags/v1',
+    ]) {
+      assert.notEqual(resolveCertificateIdentity({ identity }).source, 'widened');
+    }
   });
 
   it('refuses a regexp that does not compile rather than passing it to cosign', () => {
@@ -190,6 +244,14 @@ describe('resolveCertificateIdentity — flag selection', () => {
     );
   });
 
+  it('accepts DEFAULT_IDENTITY_REGEXP as an operator regexp', () => {
+    // The shipped default has to survive the validation the daemon applies to
+    // operator input — it is the value `docker-compose.dev-platform.yaml` sets.
+    const out = resolveCertificateIdentity({ identityRegexp: DEFAULT_IDENTITY_REGEXP });
+    assert.equal(out.value, DEFAULT_IDENTITY_REGEXP);
+    assert.equal(out.source, 'operator-regexp');
+  });
+
   it('treats blank strings as unset', () => {
     assert.equal(resolveCertificateIdentity({ identity: '   ', identityRegexp: '' }), null);
   });
@@ -204,7 +266,7 @@ describe('verifyRunnerImage — regexp argv', () => {
     const { exec, calls } = fakeExec(0);
     const out = await verifyRunnerImage({
       image: IMAGE,
-      identityRegexp: DEFAULT_TRANSITION_IDENTITY_REGEXP,
+      identityRegexp: DEFAULT_IDENTITY_REGEXP,
       issuer: ISSUER,
       mode: 'on',
       exec,
@@ -213,39 +275,46 @@ describe('verifyRunnerImage — regexp argv', () => {
     assert.deepEqual(calls[0], [
       'verify',
       '--certificate-identity-regexp',
-      DEFAULT_TRANSITION_IDENTITY_REGEXP,
+      DEFAULT_IDENTITY_REGEXP,
       '--certificate-oidc-issuer',
       ISSUER,
       IMAGE,
     ]);
   });
 
-  it('a widened pin and an explicit regexp produce the SAME argv', async () => {
-    // The widening is not a different verification mode — it is the same cosign
-    // invocation an operator would write by hand. Anything else would mean the
-    // transition window behaves unlike its own documented end state.
-    const a = fakeExec(0);
-    await verifyRunnerImage({
-      image: IMAGE,
-      identity: `${CORE_SIGNER_IDENTITY}@refs/tags/v1.2.3`,
-      issuer: ISSUER,
-      mode: 'on',
-      exec: a.exec,
-      logger: fakeLogger(),
-    });
-    const b = fakeExec(0);
-    await verifyRunnerImage({
-      image: IMAGE,
-      identityRegexp: DEFAULT_TRANSITION_IDENTITY_REGEXP,
-      issuer: ISSUER,
-      mode: 'on',
-      exec: b.exec,
-    });
-    assert.deepEqual(a.calls[0], b.calls[0]);
+  it('a stale core pin reaches cosign as an EXACT identity, unrewritten', async () => {
+    // What the removed widening used to do was rewrite this argv. It does not
+    // any more, and the difference is visible where it matters: in the arguments
+    // cosign receives.
+    const pin = `${RETIRED_CORE_SIGNER}@refs/tags/v1.2.3`;
+    const { exec, calls } = fakeExec(0);
+    await verifyRunnerImage({ image: IMAGE, identity: pin, issuer: ISSUER, mode: 'on', exec });
+    assert.deepEqual(calls[0], [
+      'verify',
+      '--certificate-identity',
+      pin,
+      '--certificate-oidc-issuer',
+      ISSUER,
+      IMAGE,
+    ]);
+  });
+
+  it('says nothing about widening, for any pin', async () => {
+    // The warning was the transition's own alarm clock. With the transition over
+    // it must be gone, not merely unreachable — a warning about a behaviour that
+    // no longer happens teaches an operator the wrong model of their daemon.
+    for (const identity of [
+      `${RETIRED_CORE_SIGNER}@refs/tags/v1.2.3`,
+      `${PLUGIN_SIGNER_IDENTITY}@refs/heads/main`,
+    ]) {
+      const { exec } = fakeExec(0);
+      const logger = fakeLogger();
+      await verifyRunnerImage({ image: IMAGE, identity, issuer: ISSUER, mode: 'on', exec, logger });
+      assert.deepEqual(logger.warns, [], `a pin on ${identity} still warned`);
+    }
   });
 
   it('still passes exact --certificate-identity for an out-of-set pin', async () => {
-    // The pre-existing argv shape is unchanged for anyone not in the transition.
     const own = 'https://github.com/acme/omadia-fork/.github/workflows/sign.yml@refs/tags/v9';
     const { exec, calls } = fakeExec(0);
     await verifyRunnerImage({ image: IMAGE, identity: own, issuer: ISSUER, mode: 'on', exec });
@@ -259,32 +328,14 @@ describe('verifyRunnerImage — regexp argv', () => {
     ]);
   });
 
-  it('tells the operator, once, that its pin was widened', async () => {
-    const { exec } = fakeExec(0);
-    const logger = fakeLogger();
-    await verifyRunnerImage({
-      image: IMAGE,
-      identity: `${CORE_SIGNER_IDENTITY}@refs/tags/v1.2.3`,
-      issuer: ISSUER,
-      mode: 'on',
-      exec,
-      logger,
-    });
-    // Silent widening is the failure mode this whole file exists to avoid
-    // becoming permanent: the narrowing step needs someone to know it is due.
-    assert.equal(logger.warns.length, 1);
-    assert.match(logger.warns[0], /widen/i);
-    assert.match(logger.warns[0], /DEV_IMAGE_COSIGN_IDENTITY_REGEXP/);
-  });
-
   it('a cosign failure under the regexp still REFUSES the image', async () => {
-    // Widening changes which signers are acceptable. It must not change what
+    // Narrowing changes which signers are acceptable. It must not change what
     // happens when none of them signed the thing.
     const { exec } = fakeExec(1);
     await assert.rejects(
       verifyRunnerImage({
         image: IMAGE,
-        identityRegexp: DEFAULT_TRANSITION_IDENTITY_REGEXP,
+        identityRegexp: DEFAULT_IDENTITY_REGEXP,
         issuer: ISSUER,
         mode: 'on',
         exec,
@@ -297,7 +348,7 @@ describe('verifyRunnerImage — regexp argv', () => {
     const { exec, calls } = fakeExec(0);
     const out = await verifyRunnerImage({
       image: IMAGE,
-      identityRegexp: DEFAULT_TRANSITION_IDENTITY_REGEXP,
+      identityRegexp: DEFAULT_IDENTITY_REGEXP,
       issuer: ISSUER,
       mode: 'off',
       exec,
@@ -314,7 +365,7 @@ describe('verifyRunnerImage — regexp argv', () => {
     const logger = fakeLogger();
     const out = await verifyRunnerImage({
       image: IMAGE,
-      identityRegexp: DEFAULT_TRANSITION_IDENTITY_REGEXP,
+      identityRegexp: DEFAULT_IDENTITY_REGEXP,
       issuer: undefined,
       mode: 'on',
       exec,
@@ -342,9 +393,30 @@ describe('the release workflow and the daemon agree', () => {
     // the only place that can be discovered before an operator's daemon refuses
     // to boot on it. The regexp cannot be imported into YAML, so it is pinned.
     assert.ok(
-      workflow.includes(DEFAULT_TRANSITION_IDENTITY_REGEXP),
-      'release-runner-image.yml does not contain DEFAULT_TRANSITION_IDENTITY_REGEXP verbatim — ' +
+      workflow.includes(DEFAULT_IDENTITY_REGEXP),
+      'release-runner-image.yml does not contain DEFAULT_IDENTITY_REGEXP verbatim — ' +
         'the publisher and the consumer have drifted',
+    );
+  });
+
+  it('the workflow no longer accepts the retired signer as an IDENTITY', () => {
+    // Narrowing one end and not the other produces a `verify` job that passes on
+    // an image the daemon would refuse — CI green, deployment dead.
+    //
+    // Scoped to the identity URL, not to the substring `publish-images`: the
+    // workflow legitimately mentions core's publish workflow elsewhere, as the
+    // precedent for its DOCKER TAG shapes. That is a naming convention, not a
+    // trust decision, and a test that conflated the two would be reworded away
+    // the first time it fired for the wrong reason.
+    assert.equal(
+      workflow.includes(RETIRED_CORE_SIGNER),
+      false,
+      'the workflow still names core’s signer identity',
+    );
+    assert.equal(
+      workflow.includes(RETIRED_CORE_SIGNER.replace(/\./g, '\\.')),
+      false,
+      'the workflow still carries core’s signer identity in escaped (regexp) form',
     );
   });
 
@@ -393,17 +465,16 @@ describe('the release workflow and the daemon agree', () => {
   });
 
   it('signs only from refs the default regexp accepts', () => {
-    // The workflow publishes automatically: a `v*` tag, and every
-    // runner-relevant push to `main`. Each of those produces a DIFFERENT
-    // certificate identity, and every one of them has to satisfy the pattern
-    // the daemon enforces — otherwise the publish succeeds, CI goes green, and
-    // the first daemon to pull the image refuses to boot.
+    // The workflow publishes automatically on a `v*` tag and on every
+    // runner-relevant push to `main`. Each produces a DIFFERENT certificate
+    // identity, and every one has to satisfy the pattern the daemon enforces —
+    // otherwise the publish succeeds, CI goes green, and the first daemon to
+    // pull the image refuses to boot.
     //
-    // A branch push signs from `refs/heads/main`, which is exactly why the ref
-    // alternation in DEFAULT_TRANSITION_IDENTITY_REGEXP has a `heads` arm.
-    // Delete it while narrowing and this test says so.
-    const re = new RegExp(DEFAULT_TRANSITION_IDENTITY_REGEXP);
-    for (const ref of ['refs/heads/main', 'refs/tags/v0.3.2', 'refs/tags/v1.10.0']) {
+    // `refs/heads/main` is exactly why the ref alternation keeps a `heads` arm
+    // at all after the narrowing. Delete it and this test says so.
+    const re = new RegExp(DEFAULT_IDENTITY_REGEXP);
+    for (const ref of ['refs/heads/main', 'refs/tags/v0.3.4', 'refs/tags/v1.10.0']) {
       assert.ok(
         re.test(`${PLUGIN_SIGNER_IDENTITY}@${ref}`),
         `${ref} is a ref this workflow signs from, and the daemon would reject it`,
@@ -415,11 +486,16 @@ describe('the release workflow and the daemon agree', () => {
     assert.match(workflow, /^\s*tags:\s*$\n\s*-\s*'v\*'\s*$/m);
   });
 
-  it('grants the attestation permission the provenance step needs', () => {
-    // `actions/attest-build-provenance` fails at the END of a publish without
-    // it — after the image is already pushed, leaving a published digest with
-    // no provenance and a red run that looks like a build failure.
-    assert.match(workflow, /^\s{2}attestations:\s*write\s*$/m);
-    assert.match(workflow, /uses:\s*actions\/attest-build-provenance/);
+  it('documents that a dispatch from a non-main branch is now unverifiable', () => {
+    // The one real cost of the ref narrowing, and the reason it is written into
+    // the workflow rather than only into docs: `workflow_dispatch` still exists
+    // and still builds, but an image it signs off a feature branch carries
+    // `@refs/heads/<branch>`, which the daemon refuses. Someone reaching for the
+    // escape hatch at 2am reads the workflow, not SUPPLY_CHAIN.md.
+    assert.ok(
+      /refs\/heads\/main|non-main|from `main`/.test(workflow),
+      'release-runner-image.yml does not warn that a non-main dispatch signs an identity the daemon rejects',
+    );
+    assert.doesNotMatch(`${PLUGIN_SIGNER_IDENTITY}@refs/heads/release-candidate`, new RegExp(DEFAULT_IDENTITY_REGEXP));
   });
 });

@@ -634,11 +634,13 @@ export async function main(env = process.env) {
   // skips with a loud warning. See imageVerify.mjs for the Fly-path caveat (Fly
   // pulls the image itself, so the guarantee there is digest-pinning + the
   // CI-verified signature on that digest, not a pull-time verify).
-  // DEV_IMAGE_COSIGN_IDENTITY_REGEXP is the transition knob (epic #470 P4, D5):
-  // the runner image's publisher moved from byte5ai/omadia to
-  // byte5ai/omadia-dev-platform, which changes the keyless certificate identity.
-  // A pin on either of the two known signers is widened automatically; this
-  // variable is how an operator says what they will accept instead.
+  // DEV_IMAGE_COSIGN_IDENTITY_REGEXP is how an operator states the accepted
+  // signer as a pattern (epic #470 P4, D5). The publisher moved from
+  // byte5ai/omadia to byte5ai/omadia-dev-platform; 0.3.2-0.3.3 widened a pin on
+  // either signer automatically, and 0.3.4 NARROWED that away again on schedule
+  // (docs/SUPPLY_CHAIN.md). Nothing is widened now: a stale DEV_IMAGE_COSIGN_IDENTITY
+  // pinned to core is passed through exactly and will refuse a newly published
+  // image — which is the intended end state, not a regression.
   await verifyConfiguredImages({
     images: warmImageRefs,
     identity: env.DEV_IMAGE_COSIGN_IDENTITY,
