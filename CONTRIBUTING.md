@@ -104,6 +104,35 @@ inside is byte-identical, and `test/migrationSql.test.ts` proves it against
 `client.query`, not the file, so an escaping bug cannot hide behind a
 symmetrical un-escape in the test.
 
+## Documentation
+
+Four documents are operator-facing, and two of them ship to people who never see
+this repository. Keep them in step:
+
+| File | Audience | Ships in the ZIP |
+|---|---|---|
+| `packages/plugin/manifest.yaml` → `setup.guide` | Whoever browses the hub or runs the install wizard | **yes**, and it is the only operator text the hub renders |
+| `packages/plugin/README.md` | Whoever unzips the artifact | **yes** |
+| `docs/OPERATOR-GUIDE.md` | Whoever runs it in production | no — linked from both |
+| `README.md` | Whoever builds or contributes | no |
+
+Two rules that are easy to get wrong:
+
+- **The hub strips every manifest block it does not name**, including
+  `optional_requires` and *all comments*. Anything an operator must know before
+  installing has to live in `identity.description`, `setup.fields` or
+  `setup.guide` — see the header comment in `manifest.yaml` for the kept/stripped
+  list with `omadia-hub` file:line references.
+- **`setup.fields` `label` and `help` are `{ en, de }` maps.** Core normalises
+  them through `manifestLocalized.normalizeLocalized` (byte5ai/omadia#602). A
+  bare string is tolerated and read as English; adding a field with an
+  English-only label is how the German install wizard ends up half-translated.
+
+Changing anything an operator does — a new permission, a new required grant, a
+changed default, a capability moving between `requires` and `optional_requires`
+— means updating `setup.guide` in **both locales** and the operator guide in the
+same PR.
+
 ## Conventions
 
 - **Issues and PRs in English.** Code comments too.
