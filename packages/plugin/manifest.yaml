@@ -3,6 +3,49 @@ schema_version: "1"
 # ---------------------------------------------------------------------------
 # The hub reads THIS file, not package.json. `identity.version` and the
 # package.json `version` must agree — `npm run package` aborts on drift.
+#
+# WHAT THE HUB KEEPS, AND WHAT IT THROWS AWAY
+# -------------------------------------------
+# `omadia-hub/lib/manifest.ts` does not store this file. It PROJECTS it into a
+# fixed index shape (`parsePublish`, :113-231) and everything it does not name
+# is gone the moment the ZIP is published. What survives:
+#
+#   identity.{id,name,version,kind,domain,description,categories,
+#             authors,license,icon_url}   → lib/manifest.ts:205-216
+#   compat.core                           → :219   (compat.node is DROPPED)
+#   setup.fields[]                        → :224   verbatim objects
+#   setup.guide                           → :225   {locale: markdown} map
+#   provides / requires / depends_on      → :221-223  strings only
+#   permissions                           → :226   verbatim object
+#
+# Everything else is STRIPPED. Three of those matter here:
+#
+#   1. `optional_requires:` is NOT in that list. The hub never reads it
+#      (:221-223 name `provides`, `requires` and `depends_on` and nothing
+#      else), so the four capabilities below and — more importantly — the
+#      degradation each one takes when absent are INVISIBLE on the storefront.
+#      That is why `setup.guide` carries the degradation table in prose. Do not
+#      delete it as duplication: it is the only copy an operator can read
+#      before installing.
+#   2. EVERY COMMENT IN THIS FILE. `parseYaml` keeps values, not trivia. The
+#      rationale comments are for whoever edits this file — never for the
+#      operator. Anything the operator must know belongs in `setup.guide`.
+#   3. `lifecycle.entry`. Core reads it at install; the hub does not.
+#
+# And two rendering traps on the hub's detail page:
+#   - `summarizePermission` (app/p/[...id]/page.tsx:309-317) collapses a NESTED
+#     array to its length: `network.outbound` renders as "outbound: [4]", so the
+#     four hosts are invisible. A top-level array value survives, but keyed by
+#     index — `public_paths` renders as "0: /api/v1/dev-runner · 1: …", which is
+#     legible but not self-explanatory. Either way the operator-facing reason
+#     for each entry has to be spelled out in `setup.guide`; the permissions
+#     grid shows values, never rationale.
+#   - `SetupRow` (:243-259) prints `label` through `asText`, which
+#     JSON.stringifies a non-string. The `{en,de}` maps below are the shape core
+#     normalises (`manifestLocalized.ts`, OM-17/#602) and the install wizard
+#     renders correctly; the hub's storefront table still needs a one-line fix
+#     to resolve them. Tracked — do not flatten these back to bare strings to
+#     work around a display bug in a different repository.
 # ---------------------------------------------------------------------------
 
 identity:
@@ -23,18 +66,52 @@ identity:
   kind: "extension"
   version: "0.3.1"
   domain: "dev-platform"
-  description: "The Omadia Dev Platform — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470)."
+  description: "Runs autonomous coding jobs against your GitHub repositories. An agent clones a repo into an isolated runner, drives an LLM through an analyze/plan/implement/review pipeline, and opens a pull request — bounded at every step by human approval gates, a diff policy, a per-job cost budget and an egress allowlist. Ships its own operator UI, HTTP routes, chat tools, background workers and nine database tables it migrates itself. Runners execute on Fly Machines or on local Docker; neither ever sees a long-lived credential. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470)."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
       url: "https://omadia.ai"
   license: "MIT"
+  # The hub's storefront facets by `kind`, and its category selector is built
+  # from the union of every published plugin's `categories` — so a term here is
+  # a browse path, not a tag cloud. Keep it to terms an operator would actually
+  # filter on.
   categories:
     - "extension"
     - "developer-tools"
+    - "automation"
+    - "github"
 
 compat:
-  core: ">=1.0 <2.0"
+  # `>=1.5` names @omadia/plugin-api 1.5.0 — the first core release carrying the
+  # WHOLE contract surface this plugin activates against. Not a guess; each of
+  # the five extension points landed in a numbered core PR:
+  #
+  #   C4  operator-granted `permissions.public_paths`      byte5ai/omadia#791 era
+  #   C6  plugin route auth modes + route-local raw body   #791
+  #   C7  `permissions.sql` gate + advisory-locked         #787
+  #       plugin migrations
+  #   C9  `optional_requires` + `ctx.services.getOptional` #802  → plugin-api 1.3.0
+  #       + `pluginUi` nav entries
+  #   C11 `ctx.sql.seedLedger` migration handoff           #806  → plugin-api 1.5.0
+  #
+  # C11 is the newest of the five, so 1.5.0 is the floor. Pinning lower would be
+  # a claim this plugin cannot honour: on a 1.4.0 core `ctx.sql.seedLedger` is
+  # `undefined`, the ledger handoff silently does not happen, and the migrations
+  # re-run against a schema core already created.
+  #
+  # C15 (`permissions.sql.handoff`, below) wants plugin-api 1.6.0 and does NOT
+  # raise this floor, because it degrades cleanly: a core older than 1.6.0
+  # ignores the unknown key and the `activate()` `seedLedger` call remains the
+  # thing that performs the handoff. The floor tracks what this plugin cannot
+  # run without, not what it would prefer.
+  #
+  # NOTE, so nobody mistakes this for a gate: core does NOT enforce it. Nothing
+  # in `middleware/src` semver-compares `compat_core` — `manifestLoader.ts:503`
+  # and `registryClient.ts:415` only carry the string through to the store view
+  # (`web-ui/app/store/[id]/page.tsx:434`). It is a declaration to the operator,
+  # so it must be honest rather than permissive.
+  core: ">=1.5 <2.0"
   node: ">=20"
 
 lifecycle:
@@ -185,13 +262,98 @@ setup:
 
       ### Before you install
 
+      **omadia core 1.5 or newer.** The plugin activates against extension
+      points that landed across five core releases; the newest is
+      `ctx.sql.seedLedger` (the migration handoff). On an older core the handoff
+      silently does not happen and the migrations re-run against a schema core
+      already created.
+
       **A Postgres-backed knowledge graph is required.** The job spine, repo,
       gate and artifact tables live there. With an in-memory graph the plugin
       refuses to activate rather than pretending to work — set `DATABASE_URL`
       and install the Neon knowledge-graph plugin first.
 
-      **Grant the SQL permission.** This plugin owns nine tables and migrates
-      them itself, into its own ledger (`omadia_dev_platform_migrations`).
+      ### Two operator grants — do these, or the plugin does not work
+
+      This plugin declares two permissions that a manifest alone cannot give it.
+      Core requires a human to agree, separately, after install.
+
+      **1. The SQL permission (`permissions.sql`).** The plugin owns nine tables
+      and migrates them itself into its own ledger,
+      `plg_omadia_dev_platform_migrations`. Core provisions `ctx.sql` only when
+      a row exists in `plugin_sql_grants`.
+
+      > **There is no button for this yet.** Core ships no UI and no API route
+      > that writes that row — `middleware/src/platform/pluginSqlGrants.ts`
+      > records it twice in its own source ("no shipped grant surface — nothing
+      > in `src/` calls `grant()`"). Until core ships one, an operator with
+      > database access inserts it by hand:
+      >
+      > ```sql
+      > INSERT INTO plugin_sql_grants (plugin_id, ledger, granted_by)
+      > VALUES ('@omadia/dev-platform',
+      >         'plg_omadia_dev_platform_migrations',
+      >         'you@example.com');
+      > ```
+      >
+      > The ledger name must match the manifest exactly — core compares them and
+      > treats a mismatch as no grant at all. Restart the middleware afterwards.
+
+      **2. The public-path grants (`permissions.public_paths`).** Three URL
+      prefixes are served without a kernel session, because the caller has no
+      session to present. Each is still authenticated, just not by one:
+
+      - `/api/v1/dev-runner` — a per-job bearer token, verified in the router.
+      - `/api/webhooks/github` — HMAC-SHA256 over the raw request body.
+      - `/api/v1/dev-platform` — the GitHub App manifest-conversion callback,
+        bound to a kernel-signed, plugin-audience state token.
+
+      This one **does** have a shipped surface, behind operator auth:
+
+      ```
+      GET  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
+      PUT  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
+           { "paths": ["/api/v1/dev-runner",
+                       "/api/webhooks/github",
+                       "/api/v1/dev-platform"] }
+      ```
+
+      `PUT` takes the COMPLETE set you consent to — omitting a prefix revokes
+      it. Consent cannot exceed the declaration: core rejects any prefix this
+      manifest does not ask for. Without these grants the runner cannot phone
+      home, webhooks 401, and GitHub App onboarding cannot complete.
+
+      ### What this plugin does without, and what you lose
+
+      Four capabilities are declared **optional**. The plugin installs and runs
+      when core does not provide them, and each absence is logged rather than
+      silent. This table is the only place you can read it before installing —
+      the registry does not carry optional capabilities.
+
+      | Capability | Absent means |
+      |---|---|
+      | `turnContext@1` | The chat dev-job tools are **not registered at all**, rather than registered and always refusing. They authorize per call against the human driving the turn; with no envelope there is nothing to authorize against. Use the operator UI instead. |
+      | `githubAppJwt@1` | The plugin falls back to a local RS256 signer. Functionally equivalent; the App private key is held by the plugin rather than by core. |
+      | `usageTelemetry@1` | No rows in the operator cost dashboard's ledger. **Per-job budgets are unaffected** — they meter this plugin's own tables and keep enforcing. |
+      | `conductorRoles@1` | Repositories whose approver is a ROLE rather than a person cannot have their gates approved. Fail-CLOSED — the safe direction, but a regression you should know about. Assign named approvers instead. |
+
+      Only `graphPool@1` is mandatory. If core cannot provide it the install is
+      refused with `install.missing_capability` (HTTP 409).
+
+      ### Where your runners execute
+
+      Two backends, chosen by what you configure in the deployment — not here:
+
+      - **Fly Machines** — one ephemeral Machine per job, in a dedicated Fly
+        app named by `DEV_FLY_RUNNER_APP`. This is the production path. The app
+        must exist before the first job.
+      - **Local Docker** — the compose overlay shipped with this repository
+        (`docker-compose.dev-platform.yaml`), which brings up the runner daemon,
+        the egress proxy and one privileged docker-in-docker service. Best for
+        evaluation and self-hosting.
+
+      Either way the runner reaches this middleware at the phone-home URL below,
+      so a loopback address only works when the runner shares the host.
 
       ### What lives here, and what lives in your deployment
 
@@ -214,6 +376,28 @@ setup:
       deliberate: both modes put a credential or your host filesystem within
       reach of code an agent wrote.
 
+      ### Upgrading from the Dev Platform that ran inside core
+
+      Migration slots 0022–0030 are already applied on your database and
+      recorded in CORE's ledger. This plugin adopts them instead of re-applying
+      them — but only where a WITNESS proves the schema object each file creates
+      is actually present. The case that makes this necessary is rows present,
+      tables absent: a restore from an older snapshot, a version-skewed
+      rollback, a table dropped during an incident.
+
+      `handoff-plan.json` ships inside the ZIP so you can see the plan against
+      your real database BEFORE installing. Dry run is the default:
+
+      ```
+      cd <omadia>/middleware && npm run build
+      DATABASE_URL=… node scripts/plugin-ledger-handoff.mjs \
+        --plan <zip>/handoff-plan.json
+      ```
+
+      Read `skippedNoWitness` in the output. Empty is healthy. Non-empty means
+      core's ledger and your live schema disagree — not a failure of the
+      handoff, but a reason to confirm the database is the one you think it is.
+
       ### After installing — you re-enter the credentials
 
       Connect a repository under **Dev Platform → Repositories**. A GitHub App
@@ -221,8 +405,9 @@ setup:
       single-repo, read-only token that is revoked when the job ends.
 
       **GitHub App keys and repository tokens are not migrated for you.** This
-      plugin stores credentials in its own vault namespace, so App private keys,
-      webhook secrets and per-repo clone tokens are entered here once, by you.
+      plugin stores credentials in its own vault namespace, so App signing
+      material, webhook secrets and per-repo clone tokens are entered here once,
+      by you.
       That is a deliberate choice over a one-time migration hook: the right
       moment to see that a GitHub App private key has moved into a plugin's
       namespace is while it is happening. The same applies after a reinstall.
@@ -237,14 +422,102 @@ setup:
 
       ### Vor der Installation
 
+      **omadia Core 1.5 oder neuer.** Das Plugin aktiviert gegen
+      Erweiterungspunkte aus fünf Core-Releases; der jüngste ist
+      `ctx.sql.seedLedger` (die Migrations-Übergabe). Auf älterem Core findet
+      die Übergabe still nicht statt und die Migrationen laufen erneut gegen ein
+      Schema, das Core bereits angelegt hat.
+
       **Ein Postgres-gestützter Knowledge Graph ist Voraussetzung.** Job-,
       Repo-, Gate- und Artefakt-Tabellen liegen dort. Mit einem In-Memory-Graph
       verweigert das Plugin die Aktivierung, statt Betrieb vorzutäuschen — setze
       zuerst `DATABASE_URL` und installiere das Neon-Knowledge-Graph-Plugin.
 
-      **Erteile die SQL-Berechtigung.** Das Plugin besitzt neun Tabellen und
-      migriert sie selbst, in sein eigenes Ledger
-      (`omadia_dev_platform_migrations`).
+      ### Zwei Freigaben durch dich — ohne sie läuft das Plugin nicht
+
+      Das Manifest *fragt*; zustimmen muss ein Mensch. Keine der beiden Freigaben
+      ergibt sich aus der Installation.
+
+      **1. Die SQL-Berechtigung (`permissions.sql`).** Das Plugin besitzt neun
+      Tabellen und migriert sie selbst in sein eigenes Ledger
+      `plg_omadia_dev_platform_migrations`. Core stellt `ctx.sql` nur bereit,
+      wenn in `plugin_sql_grants` eine passende Zeile existiert.
+
+      > **Dafür gibt es noch keinen Button.** Core liefert weder UI noch
+      > API-Route, die diese Zeile schreibt —
+      > `middleware/src/platform/pluginSqlGrants.ts` hält das zweimal im eigenen
+      > Quelltext fest („no shipped grant surface — nothing in `src/` calls
+      > `grant()`"). Bis Core eine Oberfläche liefert, trägt sie jemand mit
+      > Datenbankzugriff von Hand ein:
+      >
+      > ```sql
+      > INSERT INTO plugin_sql_grants (plugin_id, ledger, granted_by)
+      > VALUES ('@omadia/dev-platform',
+      >         'plg_omadia_dev_platform_migrations',
+      >         'du@example.com');
+      > ```
+      >
+      > Der Ledger-Name muss exakt dem Manifest entsprechen — Core vergleicht
+      > beide und wertet jede Abweichung als gar keine Freigabe. Danach die
+      > Middleware neu starten.
+
+      **2. Die Public-Path-Freigaben (`permissions.public_paths`).** Drei
+      Präfixe werden ohne Kernel-Session ausgeliefert, weil der Aufrufer keine
+      hat. Authentifiziert sind sie trotzdem, nur anders:
+
+      - `/api/v1/dev-runner` — Bearer-Token pro Job, im Router geprüft.
+      - `/api/webhooks/github` — HMAC-SHA256 über den rohen Request-Body.
+      - `/api/v1/dev-platform` — der GitHub-App-Callback, gebunden an ein
+        kernel-signiertes State-Token mit Plugin-Audience.
+
+      Hierfür gibt es eine fertige Schnittstelle hinter Operator-Auth:
+
+      ```
+      GET  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
+      PUT  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
+           { "paths": ["/api/v1/dev-runner",
+                       "/api/webhooks/github",
+                       "/api/v1/dev-platform"] }
+      ```
+
+      `PUT` erwartet die VOLLSTÄNDIGE Menge — ein weggelassenes Präfix wird
+      entzogen. Die Zustimmung kann die Deklaration nicht überschreiten: Core
+      lehnt jedes Präfix ab, das dieses Manifest nicht anfragt. Ohne diese
+      Freigaben erreicht der Runner die Middleware nicht, Webhooks laufen auf
+      401, und das GitHub-App-Onboarding kann nicht abschließen.
+
+      ### Worauf dieses Plugin verzichten kann — und was dich das kostet
+
+      Vier Capabilities sind **optional** deklariert. Das Plugin installiert und
+      läuft auch ohne sie, und jede Abwesenheit wird geloggt, keine ist still.
+      Diese Tabelle ist die einzige Stelle, an der du das vor der Installation
+      nachlesen kannst — die Registry führt optionale Capabilities nicht.
+
+      | Capability | Abwesenheit bedeutet |
+      |---|---|
+      | `turnContext@1` | Die Chat-Tools werden **gar nicht erst registriert**, statt registriert zu sein und jeden Aufruf abzulehnen. Sie autorisieren pro Aufruf gegen den Menschen im Turn; ohne Envelope gibt es nichts, wogegen autorisiert werden könnte. Nutze stattdessen die Operator-UI. |
+      | `githubAppJwt@1` | Rückfall auf einen lokalen RS256-Signer. Funktional gleichwertig; die App-Signaturschlüssel liegen dann beim Plugin statt bei Core. |
+      | `usageTelemetry@1` | Keine Zeilen im Kosten-Dashboard. **Budgets pro Job sind nicht betroffen** — sie messen die eigenen Tabellen des Plugins und greifen weiter. |
+      | `conductorRoles@1` | Repositories, deren Freigeber eine ROLLE ist, lassen sich nicht mehr freigeben. Fail-CLOSED — die sichere Richtung, aber eine Einschränkung, die du kennen solltest. Trage stattdessen namentliche Freigeber ein. |
+
+      Nur `graphPool@1` ist zwingend. Kann Core es nicht bereitstellen, wird die
+      Installation mit `install.missing_capability` (HTTP 409) abgelehnt.
+
+      ### Wo deine Runner laufen
+
+      Zwei Backends, ausgewählt über dein Deployment — nicht hier:
+
+      - **Fly Machines** — eine kurzlebige Machine pro Job, in einer eigenen
+        Fly-App (`DEV_FLY_RUNNER_APP`). Das ist der Produktionspfad; die App
+        muss vor dem ersten Job existieren.
+      - **Lokales Docker** — das Compose-Overlay aus diesem Repository
+        (`docker-compose.dev-platform.yaml`) mit Runner-Daemon, Egress-Proxy und
+        genau einem privilegierten Docker-in-Docker-Dienst. Gut für Evaluierung
+        und Self-Hosting.
+
+      In beiden Fällen erreicht der Runner diese Middleware über die
+      Callback-URL unten — eine Loopback-Adresse funktioniert also nur, wenn der
+      Runner denselben Host teilt.
 
       ### Was hier steht — und was in dein Deployment gehört
 
@@ -268,6 +541,30 @@ setup:
       Credential oder dein Host-Dateisystem in Reichweite von Code, den ein Agent
       geschrieben hat.
 
+      ### Umstieg von der Dev Platform, die in Core lief
+
+      Die Migrations-Slots 0022–0030 sind auf deiner Datenbank bereits angewandt
+      und in CORES Ledger vermerkt. Dieses Plugin übernimmt sie, statt sie
+      erneut anzuwenden — aber nur dort, wo ein ZEUGE belegt, dass das
+      Schema-Objekt der jeweiligen Datei tatsächlich existiert. Der Fall, der das
+      nötig macht, ist: Zeilen vorhanden, Tabellen NICHT — ein Restore aus einem
+      älteren Snapshot, ein versionsschiefer Rollback, eine im Störfall
+      gelöschte Tabelle.
+
+      `handoff-plan.json` liegt im ZIP, damit du den Plan VOR der Installation
+      gegen deine echte Datenbank sehen kannst. Dry-Run ist die Voreinstellung:
+
+      ```
+      cd <omadia>/middleware && npm run build
+      DATABASE_URL=… node scripts/plugin-ledger-handoff.mjs \
+        --plan <zip>/handoff-plan.json
+      ```
+
+      Lies `skippedNoWitness` in der Ausgabe. Leer ist gesund. Nicht leer heißt:
+      Cores Ledger und dein tatsächliches Schema widersprechen sich — kein
+      Fehler der Übergabe, aber ein Grund, sich zu vergewissern, dass es die
+      Datenbank ist, für die du sie hältst.
+
       ### Nach der Installation — die Credentials trägst du selbst ein
 
       Verbinde ein Repository unter **Dev Platform → Repositories**. Eine GitHub
@@ -284,119 +581,189 @@ setup:
       dann, wenn es passiert. Nach einer Neuinstallation gilt dasselbe. Die
       vollständige Liste und die Rotation stehen in `docs/SECRETS.md`.
 
+  # `label` and `help` are `{ <locale>: text }` maps. Core normalises both
+  # through `manifestLocalized.normalizeLocalized` (OM-17 / byte5ai/omadia#602)
+  # and the catalog projection and the install wizard share that one function,
+  # so the store view and the form can never disagree about what a field says.
+  # A bare string is still tolerated and read as English — the map is the
+  # canonical form, and it is what puts German in front of a German operator.
   fields:
     # --- reachability -------------------------------------------------------
     - key: "runner_base_url"
       type: "url"
-      label: "Runner phone-home base URL"
-      help: "The base URL a runner reaches this middleware at, e.g. https://bot.example.com. Runners are launched OUTSIDE this process and call back to it; a loopback address only works when the runner shares the host."
+      label:
+        en: "Runner phone-home base URL"
+        de: "Callback-URL für Runner"
+      help:
+        en: "The base URL a runner reaches this middleware at, e.g. https://bot.example.com. Runners are launched OUTSIDE this process and call back to it, so a loopback address only works when the runner shares the host. Leave empty and the plugin derives it from the incoming request, which is wrong behind a proxy that rewrites Host."
+        de: "Basis-URL, unter der ein Runner diese Middleware erreicht, z. B. https://bot.example.com. Runner laufen AUSSERHALB dieses Prozesses und rufen zurück — eine Loopback-Adresse funktioniert nur, wenn der Runner denselben Host teilt. Leer lassen heißt: aus dem eingehenden Request abgeleitet, was hinter einem Proxy mit umgeschriebenem Host falsch ist."
       required: false
 
     - key: "commit_author"
       type: "string"
-      label: "Commit author"
-      help: "Identity on commits the platform pushes, as `Name <email>`."
+      label:
+        en: "Commit author"
+        de: "Commit-Autor"
+      help:
+        en: "Identity on commits the platform pushes, as `Name <email>`. This is what shows up in your repository history and in blame — pick something that is obviously a bot."
+        de: "Identität für Commits, die die Plattform pusht, im Format `Name <email>`. Das steht später in der Repo-History und in `git blame` — nimm etwas, das erkennbar ein Bot ist."
       default: "omadia dev platform <dev-platform@omadia.ai>"
       required: false
 
     # --- concurrency + time bounds -----------------------------------------
     - key: "max_concurrent_jobs"
       type: "integer"
-      label: "Max concurrent jobs"
-      help: "How many jobs may run at once. Each one holds a runner."
+      label:
+        en: "Max concurrent jobs"
+        de: "Maximal gleichzeitige Jobs"
+      help:
+        en: "How many jobs may run at once. Each one holds a runner, so this is also the ceiling on how many Fly Machines or containers exist at peak — size it against your runner budget, not against your queue."
+        de: "Wie viele Jobs gleichzeitig laufen dürfen. Jeder belegt einen Runner, also ist das zugleich die Obergrenze gleichzeitiger Fly-Machines bzw. Container — orientiere dich am Runner-Budget, nicht an der Warteschlange."
       default: "2"
       required: false
 
     - key: "job_wall_clock_ms"
       type: "integer"
-      label: "Job wall-clock limit (ms)"
-      help: "Hard ceiling on one job's total runtime. Exceeding it terminates the runner and fails the job."
+      label:
+        en: "Job wall-clock limit (ms)"
+        de: "Laufzeitlimit pro Job (ms)"
+      help:
+        en: "Hard ceiling on one job's total runtime. Exceeding it terminates the runner and fails the job. Default 2700000 = 45 minutes."
+        de: "Harte Obergrenze für die Gesamtlaufzeit eines Jobs. Wird sie überschritten, wird der Runner beendet und der Job schlägt fehl. Default 2700000 = 45 Minuten."
       default: "2700000"
       required: false
 
     - key: "heartbeat_timeout_ms"
       type: "integer"
-      label: "Heartbeat timeout (ms)"
-      help: "A runner silent for longer is treated as stalled and reaped."
+      label:
+        en: "Heartbeat timeout (ms)"
+        de: "Heartbeat-Timeout (ms)"
+      help:
+        en: "A runner silent for longer is treated as stalled and reaped. Set it below the wall-clock limit or a hung runner burns the full budget before anything notices. Default 300000 = 5 minutes."
+        de: "Ein Runner, der länger schweigt, gilt als hängend und wird eingesammelt. Muss unter dem Laufzeitlimit liegen — sonst verbrennt ein hängender Runner das volle Budget, bevor es jemand merkt. Default 300000 = 5 Minuten."
       default: "300000"
       required: false
 
     # --- LLM policy + budget ------------------------------------------------
     - key: "llm_allowed_models"
       type: "host_list"
-      label: "Allowed models"
-      help: "Model ids a job's agent may call through the proxy. EMPTY MEANS NO JOB CAN RUN — the proxy answers 500 with no policy. A model with no entry in the price table cannot have its cost budget enforced; the plugin logs a warning naming it at activation."
+      label:
+        en: "Allowed models"
+        de: "Erlaubte Modelle"
+      help:
+        en: "Model ids a job's agent may call through the proxy. EMPTY MEANS NO JOB CAN RUN — with no policy the proxy answers 500, which surfaces inside the runner as a total LLM outage. A model with no entry in the price table cannot have its cost budget enforced; the plugin logs a warning naming it at activation rather than silently metering it at zero."
+        de: "Modell-IDs, die der Agent eines Jobs über den Proxy aufrufen darf. LEER HEISST: KEIN JOB LÄUFT — ohne Policy antwortet der Proxy mit 500, was im Runner wie ein kompletter LLM-Ausfall aussieht. Für ein Modell ohne Eintrag in der Preistabelle lässt sich das Kostenbudget nicht durchsetzen; das Plugin warnt beim Aktivieren mit Modellnamen, statt es still mit 0 zu verrechnen."
       required: false
 
     - key: "llm_default_budget_usd"
       type: "integer"
-      label: "Default budget per job (USD)"
-      help: "Cost ceiling for one job's LLM spend, unless the repository overrides it. Crossing it marks the job budget_exceeded and terminates the runner mid-call."
+      label:
+        en: "Default budget per job (USD)"
+        de: "Standardbudget pro Job (USD)"
+      help:
+        en: "Cost ceiling for one job's LLM spend, unless the repository overrides it. Crossing it marks the job budget_exceeded and terminates the runner mid-call — enforcement is not deferred to the end of the turn."
+        de: "Kostenobergrenze für die LLM-Ausgaben eines Jobs, sofern das Repository sie nicht überschreibt. Wird sie überschritten, markiert das den Job als budget_exceeded und beendet den Runner mitten im Call — die Durchsetzung wartet nicht auf das Ende des Turns."
       default: "5"
       required: false
 
     - key: "llm_max_output_tokens"
       type: "integer"
-      label: "Max output tokens per call"
-      help: "Clamp on max_tokens. Bounds how far a single response can overshoot the budget before enforcement sees it."
+      label:
+        en: "Max output tokens per call"
+        de: "Maximale Output-Tokens pro Call"
+      help:
+        en: "Clamp on max_tokens. Bounds how far a single response can overshoot the budget before enforcement sees it — the budget is checked between calls, so one very large response is the blind spot this closes."
+        de: "Begrenzt max_tokens. Bestimmt, wie weit eine einzelne Antwort das Budget überschreiten kann, bevor die Durchsetzung greift — geprüft wird zwischen den Calls, eine einzelne sehr große Antwort ist genau der blinde Fleck, den dieser Wert schließt."
       default: "8192"
       required: false
 
     # --- data lifecycle -----------------------------------------------------
     - key: "event_retention_days"
       type: "integer"
-      label: "Event retention (days)"
-      help: "Age at which low-value job telemetry is pruned by the nightly sweep."
+      label:
+        en: "Event retention (days)"
+        de: "Aufbewahrung von Events (Tage)"
+      help:
+        en: "Age at which low-value job telemetry is pruned by the nightly sweep. Audit-grade events are NOT covered by this — they follow the audit retention below."
+        de: "Alter, ab dem geringwertige Job-Telemetrie vom nächtlichen Sweep gelöscht wird. Audit-relevante Events fallen NICHT darunter — für sie gilt die Audit-Aufbewahrung unten."
       default: "30"
       required: false
 
     - key: "audit_retention_days"
       type: "integer"
-      label: "Audit retention (days)"
-      help: "Outer bound for audit-grade events (gate decisions, policy verdicts, token mint and revoke)."
+      label:
+        en: "Audit retention (days)"
+        de: "Aufbewahrung von Audit-Events (Tage)"
+      help:
+        en: "Outer bound for audit-grade events: gate decisions, policy verdicts, token mint and revoke. These are the records that answer 'who approved this change, and what was it allowed to touch' — set it to your compliance retention, not to your disk budget."
+        de: "Obergrenze für audit-relevante Events: Gate-Entscheidungen, Policy-Verdicts, Ausstellung und Widerruf von Tokens. Das sind die Datensätze, die beantworten, wer eine Änderung freigegeben hat und worauf sie zugreifen durfte — richte den Wert an deiner Compliance-Aufbewahrung aus, nicht am Speicherplatz."
       default: "365"
       required: false
 
     - key: "max_events_per_job"
       type: "integer"
-      label: "Max events per job"
-      help: "Per-job event cap, enforced at write time. A chatty runner is truncated rather than allowed to fill the table."
+      label:
+        en: "Max events per job"
+        de: "Maximale Events pro Job"
+      help:
+        en: "Per-job event cap, enforced at write time. A chatty runner is truncated rather than allowed to fill the table."
+        de: "Obergrenze für Events pro Job, durchgesetzt beim Schreiben. Ein geschwätziger Runner wird abgeschnitten, statt die Tabelle volllaufen zu lassen."
       default: "5000"
       required: false
 
     - key: "artifact_max_bytes"
       type: "integer"
-      label: "Max inline artifact size (bytes)"
-      help: "Ceiling on a single stored artifact (diff, brief, verdict)."
+      label:
+        en: "Max inline artifact size (bytes)"
+        de: "Maximale Artefaktgröße inline (Bytes)"
+      help:
+        en: "Ceiling on a single stored artifact — a diff, a brief, a review verdict. Anything larger is truncated with a marker, so raising this trades database size for the ability to read very large diffs in the UI. Default 1048576 = 1 MiB."
+        de: "Obergrenze für ein einzelnes gespeichertes Artefakt — Diff, Briefing, Review-Verdict. Größeres wird mit Marker abgeschnitten; ein höherer Wert tauscht also Datenbankgröße gegen die Lesbarkeit sehr großer Diffs in der UI. Default 1048576 = 1 MiB."
       default: "1048576"
       required: false
 
     # --- webhook triggers ---------------------------------------------------
     - key: "webhooks_enabled"
       type: "boolean"
-      label: "Accept GitHub webhooks"
-      help: "Let labelled issues create jobs automatically. Off means no webhook route is registered at all."
+      label:
+        en: "Accept GitHub webhooks"
+        de: "GitHub-Webhooks annehmen"
+      help:
+        en: "Let labelled issues create jobs automatically. Off means the webhook route is not registered at all — not registered-and-refusing, so `/api/webhooks/github` simply 404s and GitHub shows the delivery as failed."
+        de: "Lässt gelabelte Issues automatisch Jobs erzeugen. Aus heißt: Die Webhook-Route wird gar nicht erst registriert — nicht registriert-und-ablehnend. `/api/webhooks/github` antwortet dann mit 404 und GitHub zeigt das Delivery als fehlgeschlagen."
       default: "true"
       required: false
 
     - key: "webhook_max_jobs_per_repo_hour"
       type: "integer"
-      label: "Webhook jobs per repo per hour"
-      help: "Rate ceiling per repository. A webhook is a public trigger — this is what bounds a label-spam incident."
+      label:
+        en: "Webhook jobs per repo per hour"
+        de: "Webhook-Jobs pro Repo und Stunde"
+      help:
+        en: "Rate ceiling per repository. A webhook is a PUBLIC trigger — anyone who can apply a label can start a job that spends money. This is what bounds a label-spam incident."
+        de: "Ratenobergrenze pro Repository. Ein Webhook ist ein ÖFFENTLICHER Trigger — wer ein Label setzen kann, kann einen Job starten, der Geld kostet. Dieser Wert begrenzt einen Label-Spam-Vorfall."
       default: "10"
       required: false
 
     - key: "webhook_max_jobs_per_sender_hour"
       type: "integer"
-      label: "Webhook jobs per sender per hour"
-      help: "Rate ceiling per GitHub user."
+      label:
+        en: "Webhook jobs per sender per hour"
+        de: "Webhook-Jobs pro Absender und Stunde"
+      help:
+        en: "Rate ceiling per GitHub user, applied on top of the per-repo ceiling. The per-repo limit alone does not stop one account from consuming a repository's whole hourly allowance."
+        de: "Ratenobergrenze pro GitHub-Account, zusätzlich zur Repo-Grenze. Die Repo-Grenze allein verhindert nicht, dass ein einzelner Account das komplette Stundenkontingent eines Repositories aufbraucht."
       default: "5"
       required: false
 
     - key: "egress_base_allowlist"
       type: "host_list"
-      label: "Extra egress hosts for runners"
-      help: "Hosts a runner may reach beyond the defaults (package registries and the like). Private and link-local addresses are rejected."
+      label:
+        en: "Extra egress hosts for runners"
+        de: "Zusätzliche Egress-Hosts für Runner"
+      help:
+        en: "Hosts a runner may reach beyond the defaults (package registries and the like). Everything not on the list is refused by the egress proxy. Private and link-local addresses are rejected outright — an allowlist entry cannot be used to reach your internal network."
+        de: "Hosts, die ein Runner zusätzlich zu den Defaults erreichen darf (Paket-Registries und Ähnliches). Alles, was nicht auf der Liste steht, lehnt der Egress-Proxy ab. Private und Link-local-Adressen werden grundsätzlich abgewiesen — über einen Allowlist-Eintrag kommt niemand in dein internes Netz."
       required: false
 
     # --- the two interlocked safety switches --------------------------------
@@ -406,34 +773,54 @@ setup:
     # boot-time safety refusal (plan.md §6).
     - key: "subscription_mode"
       type: "boolean"
-      label: "Subscription mode"
-      help: "Run jobs against a CLI subscription credential inside the runner. REQUIRES the acknowledgment below — activation is refused without it."
+      label:
+        en: "Subscription mode"
+        de: "Subscription-Modus"
+      help:
+        en: "Run jobs against a CLI subscription credential inside the runner instead of a metered API key. REQUIRES the acknowledgment below — activation is REFUSED without it, the plugin does not start degraded."
+        de: "Führt Jobs mit einer CLI-Abo-Credential im Runner aus statt mit einem abgerechneten API-Key. ERFORDERT die Bestätigung unten — ohne sie wird die Aktivierung VERWEIGERT; das Plugin startet nicht im eingeschränkten Modus."
       default: "false"
       required: false
 
     - key: "subscription_ack"
       type: "string"
-      label: "Subscription acknowledgment"
-      help: "Type your name to acknowledge that subscription jobs run your CLI credential inside a runner executing agent-written code. Required whenever subscription mode is on."
+      label:
+        en: "Subscription acknowledgment"
+        de: "Bestätigung Subscription-Modus"
+      help:
+        en: "Type your name to acknowledge that subscription jobs run your CLI credential inside a runner that is executing code an agent wrote. Required whenever subscription mode is on. A free-text name rather than a checkbox on purpose: the point is that a person, nameable afterwards, agreed to it."
+        de: "Trage deinen Namen ein, um zu bestätigen, dass Subscription-Jobs deine CLI-Credential in einem Runner verwenden, der von einem Agenten geschriebenen Code ausführt. Erforderlich, sobald der Subscription-Modus an ist. Bewusst ein Freitextname statt einer Checkbox: Es geht darum, dass eine Person zugestimmt hat, die sich hinterher benennen lässt."
       required: false
 
     - key: "unsafe_local"
       type: "boolean"
-      label: "Unsafe local backend"
-      help: "Run the shim as a local process instead of in a container. Development only. REQUIRES the uid below — activation is refused without it."
+      label:
+        en: "Unsafe local backend"
+        de: "Unsicheres lokales Backend"
+      help:
+        en: "Run the shim as a local process instead of in a container. DEVELOPMENT ONLY — agent-written code then executes on the middleware host itself, with only the uid below between it and your filesystem. REQUIRES that uid; activation is refused without it."
+        de: "Startet den Shim als lokalen Prozess statt im Container. NUR FÜR ENTWICKLUNG — von einem Agenten geschriebener Code läuft dann auf dem Middleware-Host selbst, getrennt von deinem Dateisystem nur durch die UID unten. Diese UID ist ERFORDERLICH; ohne sie wird die Aktivierung verweigert."
       default: "false"
       required: false
 
     - key: "unsafe_local_uid"
       type: "integer"
-      label: "Local runner uid"
-      help: "Dedicated unprivileged uid the jailed shim runs as. NEVER 0. Required whenever the unsafe local backend is on."
+      label:
+        en: "Local runner uid"
+        de: "UID für lokalen Runner"
+      help:
+        en: "Dedicated unprivileged uid the jailed shim runs as. NEVER 0, and never the uid the middleware itself runs as — that would give the job write access to the middleware's own files. Required whenever the unsafe local backend is on."
+        de: "Dedizierte unprivilegierte UID, unter der der eingesperrte Shim läuft. NIEMALS 0 und niemals die UID der Middleware selbst — sonst bekäme der Job Schreibzugriff auf deren eigene Dateien. Erforderlich, sobald das unsichere lokale Backend an ist."
       required: false
 
     # --- dormant ------------------------------------------------------------
     - key: "tracker_polling_enabled"
       type: "boolean"
-      label: "Tracker polling (not yet available)"
-      help: "Poll a Jira or Linear tracker for labelled tickets. NOT WIRED in this release — six hardening fixes gate switch-on (cold-start budget, sender allowlist, label-application trigger, cross-source dedupe, ticket-id namespacing, frozen provider contract). Turning it on records the intent and logs a warning; nothing polls."
+      label:
+        en: "Tracker polling (not yet available)"
+        de: "Tracker-Polling (noch nicht verfügbar)"
+      help:
+        en: "Poll a Jira or Linear tracker for labelled tickets. NOT WIRED in this release — six hardening fixes gate switch-on (cold-start budget, sender allowlist, label-application trigger, cross-source dedupe, ticket-id namespacing, frozen provider contract). Turning it on records the intent and logs a warning; nothing polls. It is shown rather than hidden so the roadmap is visible and the key is stable when it does land."
+        de: "Fragt einen Jira- oder Linear-Tracker nach gelabelten Tickets ab. In diesem Release NICHT VERDRAHTET — sechs Härtungen stehen davor (Cold-Start-Budget, Absender-Allowlist, Trigger beim Label-Setzen, quellenübergreifende Deduplizierung, Namespacing der Ticket-IDs, eingefrorener Provider-Contract). Einschalten hält die Absicht fest und schreibt eine Warnung ins Log; gepollt wird nichts. Das Feld ist sichtbar statt versteckt, damit die Roadmap erkennbar bleibt und der Key stabil ist, wenn es soweit ist."
       default: "false"
       required: false

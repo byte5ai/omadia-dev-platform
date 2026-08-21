@@ -4,6 +4,11 @@ All notable changes to `@omadia/dev-platform`. The version that matters is
 `packages/plugin/manifest.yaml` — the hub reads the manifest, and `npm run
 package` aborts if it disagrees with `packages/plugin/package.json`.
 
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This
+project versions the ARTIFACT, not the repository: a release is a ZIP an
+operator can install, so anything that does not change the ZIP does not get a
+version.
+
 ## 0.3.1 — 2026-08-21
 
 Declares the ledger handoff in the manifest so the KERNEL performs it, closing
@@ -48,6 +53,51 @@ key and keep the previous behaviour.
   (notably `dir`), no duplicate filenames, under the 128 KiB cap, every
   filename present in `migrations/`, and a `ledger` that agrees with the
   manifest's so core does not warn about a split-brain dry run.
+
+### Documentation
+
+The hub does not store `manifest.yaml`, it PROJECTS it: `parsePublish`
+(`omadia-hub/lib/manifest.ts:113-231`) keeps a fixed set of fields and discards
+the rest — including `optional_requires` and every comment in the file. So the
+four capabilities this plugin is written to survive the absence of, and the
+degradation it takes for each, were invisible to anyone deciding whether to
+install it.
+
+- **`setup.guide` (en + de)** now carries what the registry cannot: both
+  operator grants and how to perform each, the Fly-versus-Docker runner choice,
+  the ledger-handoff dry run, and a degradation table for every
+  `optional_requires` capability. The German guide had fallen three sections
+  behind English and is back at parity.
+- **Every `setup.fields` entry carries `label` and `help` as `{ en, de }` maps**
+  — the shape core normalises through `manifestLocalized.normalizeLocalized`
+  (byte5ai/omadia#602). 21 fields, both locales.
+- **`identity.description`** rewritten for the storefront card, and
+  `categories` extended with `automation` and `github`; the hub builds its
+  category selector from the union of published plugins' categories, so these
+  are browse paths rather than tags.
+- **A header comment recording the kept/stripped split** with `omadia-hub`
+  file:line references, so the next operator-facing block does not get added
+  somewhere that is discarded at publish time.
+- **`docs/OPERATOR-GUIDE.md`** (new) — install, the two operator grants,
+  credentials, runner backends, the migration handoff, uninstall/purge,
+  troubleshooting and known issues, in one place.
+- **`packages/plugin/README.md`**, which ships INSIDE the ZIP, still described
+  0.1.0 ("Nothing yet", "no routes", "Permissions: none declared"). It is the
+  first thing an operator reads after unzipping; rewritten for what this
+  release actually does.
+- **`README.md`** rewritten from "Status: P0 — scaffold" to the current
+  release, with an architecture diagram; **`CONTRIBUTING.md`** gains a section
+  on keeping the four operator-facing documents in step.
+
+### Changed (documentation pass)
+
+- **`compat.core` `>=1.0 <2.0` → `>=1.5 <2.0`.** `@omadia/plugin-api` 1.5.0 is
+  the first core carrying C4, C6, C7, C9 and C11 — the surface this plugin
+  cannot activate without. Core never semver-compares `compat_core`
+  (`manifestLoader.ts:503`, `registryClient.ts:415` only carry the string
+  through to the store view), which is precisely why it has to be honest rather
+  than permissive. Note this release's own `permissions.sql.handoff` wants
+  **1.6.0** and degrades cleanly below it, so it does not raise the floor.
 
 ## 0.3.0 — 2026-08-21
 
@@ -105,6 +155,114 @@ that carries the whole C9–C11 contract surface: `optional_requires`,
 
 ## 0.2.0 — 2026-08-20
 
-Extraction of the Dev Platform out of omadia core into this repository (epic
-byte5ai/omadia#470, P1–P5 plus C11). See
-`docs/ACCEPTANCE-RUN-2026-08-20.md` for the acceptance run that closed it.
+The extraction itself. The Dev Platform moved out of omadia core into this
+repository — plugin tree, operator SPA, runner sidecars and the migration
+handoff (epic byte5ai/omadia#470, phases P2–P5 plus C11). Core stayed live and
+unchanged throughout; this release is the copy that proves the destination
+works, not the deletion of the origin. See `docs/ACCEPTANCE-RUN-2026-08-20.md`
+for the run that closed it: **71 PASS / 0 FAIL / 2 BLOCKED** against
+`main`+C6+C7.
+
+### Added
+
+- **The middleware tree (P3).** 60 of 62 dev-platform source files, 52 of 58
+  suites and all nine migrations, ported against the C6 and C7 extension
+  points: dev jobs, the analyze/plan/implement/review pipeline, gate and diff
+  policy, the LLM budget proxy, HTTP routers, chat tools and background
+  workers.
+- **The operator SPA (P2).** The 28 files under core's
+  `web-ui/app/admin/dev-platform/**` rebuilt as a standalone Vite/React 19
+  bundle in `packages/ui`, shipped inside the ZIP as `ui/` and served by core at
+  `/p/<pluginId>/ui/`. Four screens: hub, job detail, repo detail, add-repo
+  wizard. `next-intl` became a 300-key-per-locale `src/lib/i18n.tsx`;
+  `next/navigation` became a hash router, because a path route would 404 on
+  reload against a static mount and a fragment never reaches the server.
+  `scripts/check-ui-vocabulary.mjs` gates the build against the 690 classes core
+  actually serves — all 334 Tailwind arbitrary values are gone, since the ZIP
+  allowlist rejects that shape and a class core never saw renders unstyled
+  rather than erroring.
+- **Runner sidecars and the supply chain (P4).** `sidecars/dev-runner`,
+  `sidecars/dev-runner-daemon` (control plane + egress proxy),
+  `sidecars/dev-dind`, the protocol shim in `packages/runner-shim`, the compose
+  overlay and the operator transcript CLI. Core's other four sidecars
+  (pii-detector, privacy-detector-presidio, skillspector, updater) are core's
+  and stayed there.
+- **Migration handoff (C11).** `ctx.sql.seedLedger()` records core's already-run
+  slots 0022–0030 as applied in this plugin's own ledger instead of re-applying
+  all nine — but never on core's word alone. Each of the nine files carries a
+  WITNESS in `src/ledgerHandoff.ts` proving the schema object it creates is
+  actually present. `handoff-plan.json` ships in the ZIP so an operator can
+  dry-run the handoff against production **before** installing.
+- `scripts/acceptance-local.mjs` — an idempotent acceptance harness, 39 handler
+  probes.
+
+### Fixed
+
+- **`activate()` double-registered every chat tool**, via `register` and
+  `registerHandler` — two doors into one name-keyed kernel map that both throw
+  on a duplicate. The root cause was a hand-narrowed context type missing the
+  handler parameter, which made the correct call unwritable.
+- **The ZIP shipped 145 sourcemaps** (1,736,840 bytes). Archive 965,433 →
+  517,009 bytes.
+- **The first ZIP was cut without `migrations/`** — it installed clean and then
+  failed at activation with the plugin's nine tables absent. `migrations/` is
+  now a required directory in `build-zip.mjs`, alongside `dist` and `ui`.
+- **Parallel suites sharing one database claimed each other's jobs**, reporting
+  defects that existed in neither. With a database configured the runner now
+  switches to `--test-concurrency=1`; the pure run stays parallel.
+- Two real defects surfaced by turning on the daemon's never-wired `typecheck`:
+  `proxyClient.mjs` passed its abort callback as `withDeadline`'s third
+  argument (`label`), so the abort never fired and a hung egress proxy leaked
+  its fetch until process exit; and `buildEgressProxyClient` passed `tokens[0]`
+  through unchecked, so an empty `DEV_RUNNER_DAEMON_TOKEN` authenticated the
+  daemon to its own proxy as `Bearer undefined` — every job then saw 407 on
+  every request, which inside a runner looks like a total network outage. Now a
+  boot refusal.
+
+### Reported upstream
+
+Six core gaps found by the acceptance run and filed against omadia:
+byte5ai/omadia#794, #795, #796, #797, #798, plus C12's static `publicPaths`
+literals. None was plugin-side and none blocked staging.
+
+## 0.1.0 — 2026-08-20
+
+Scaffold. A repository that builds, tests and cuts a real, installable — and
+deliberately empty — plugin artifact. **No dev-platform code had moved yet.**
+
+That order was the point. A repository that cannot cut its own release artifact
+ends up publishing from whatever tree someone last built in, a failure this
+plugin set had already lived through when a package kept being released from a
+frozen monorepo branch. The pipeline got proven while the payload was empty and
+a mistake cost nothing.
+
+### Added
+
+- npm workspaces layout: `packages/plugin-api` (types-only),
+  `packages/plugin`, `packages/ui`. Conventions follow
+  `omadia-integration-odoo`: ESM, `tsc` build, the `@omadia/plugin-api` sibling
+  linked by `file:` with a `"*"` peer, and a `build-zip.mjs` that emits a flat
+  `out/<id>-<version>.zip`.
+- `identity.kind: "extension"`, decided rather than defaulted.
+  `toolPluginRuntime` activates only `tool`/`extension`/`integration`, and the
+  agent-builder treats `kind === "integration"` as "an external system an agent
+  may read from" — which the Dev Platform is not. There is no `platform` kind.
+- Packaging guards, all mutation-checked rather than merely green: version
+  drift, identity drift, a non-activatable kind, an uncommented permissions
+  block, a missing locale and a missing build artifact each fail the build or
+  the suite.
+- CI that checks out this repo and `byte5ai/omadia` side by side, builds only
+  `middleware/packages/plugin-api` from the sibling, then runs `npm ci`,
+  typecheck, build, test and package, and uploads the ZIP.
+
+### Fixed
+
+- The first CI run went red on two traps that are invisible locally.
+  `middleware/package.json` is an npm workspace root, so `npm install` run from
+  inside `packages/plugin-api` is hijacked to the root and leaves the package's
+  own `node_modules` empty — the local clean-room check had missed it by
+  copying the package into a bare temp dir where no parent workspace exists.
+  And `npx tsc` does not fail when TypeScript is absent: it downloads an
+  unrelated abandoned `tsc` package and exits 1 with a misleading message. The
+  compiler is now invoked by explicit path, and both notes are carried in
+  README and CONTRIBUTING where a contributor hits the same traps.

@@ -1,0 +1,496 @@
+# Operator Guide — `@omadia/dev-platform`
+
+Everything needed to install, consent to, credential, run, upgrade and remove
+the Dev Platform. The [README](../README.md) is the project overview; this is
+the runbook.
+
+- [1. What you are installing](#1-what-you-are-installing)
+- [2. Prerequisites](#2-prerequisites)
+- [3. Install](#3-install)
+- [4. The two operator grants](#4-the-two-operator-grants)
+- [5. Credentials — you enter these yourself](#5-credentials--you-enter-these-yourself)
+- [6. Choosing a runner backend](#6-choosing-a-runner-backend)
+- [7. Migration handoff](#7-migration-handoff)
+- [8. Optional capabilities and what you lose](#8-optional-capabilities-and-what-you-lose)
+- [9. Supply chain](#9-supply-chain)
+- [10. Uninstall and purge](#10-uninstall-and-purge)
+- [11. Troubleshooting](#11-troubleshooting)
+- [12. Known open issues](#12-known-open-issues)
+
+---
+
+## 1. What you are installing
+
+An agent clones one of your repositories into an isolated runner, works a job
+through an analyze → plan → implement → review pipeline, and opens a pull
+request. Human approval gates, a diff policy, a per-job cost budget and a
+default-deny egress proxy bound what it can do.
+
+The plugin contributes nine database tables it migrates itself, three chat
+tools, three background workers, an operator SPA, and HTTP routes — three of
+which are served without a kernel session and therefore need your explicit
+consent (§4).
+
+## 2. Prerequisites
+
+| Requirement | Why |
+|---|---|
+| **omadia core ≥ 1.5** (`@omadia/plugin-api` 1.5.0) | The floor: `ctx.sql.seedLedger` (the migration handoff) arrived there. Below it the handoff silently does not happen. **1.6.0 is recommended** — it honours `permissions.sql.handoff`, which is what makes the handoff run *before* core's own migration runner (G7, §12). |
+| **Postgres-backed knowledge graph** | The job, repo, gate and artifact tables live in `graphPool`. With an in-memory graph the plugin **refuses to activate** rather than pretending to work — set `DATABASE_URL` and install the Neon knowledge-graph plugin first. |
+| **A runner backend** | Fly Machines or local Docker. See §6. |
+| **An LLM provider key** | The proxy forwards to it. Also required for core's own orchestrator to publish `chatAgent@1`. |
+
+`graphPool@1` is the plugin's only hard capability requirement. If core cannot
+provide it, install is refused with HTTP 409 `install.missing_capability`.
+
+## 3. Install
+
+**From the hub.** In your omadia instance, open **Admin → Registries**, add
+`https://hub.omadia.ai`, then install **Dev Platform** from
+**Admin → Plugins → Store**.
+
+**From a ZIP.** Build it yourself and upload in the admin UI:
+
+```bash
+npm ci && npm run build
+npm run package -w packages/plugin
+# → packages/plugin/out/omadia-dev-platform-<version>.zip
+```
+
+The artifact is flat — `manifest.yaml`, `package.json`, `dist/`, `migrations/`,
+`ui/`, `handoff-plan.json` and `LICENSE` at the archive root, no wrapping
+directory.
+
+> **Never re-upload a changed ZIP under the same version.** The previously
+> `import()`ed module is reused from Node's ESM cache, so the old code keeps
+> serving until you restart the middleware. Bump the version instead. This cost
+> real time during the acceptance run; it will cost an operator more.
+
+## 4. The two operator grants
+
+The manifest *asks*; a human has to *agree*. Neither grant is implied by
+installing.
+
+### 4.1 The SQL permission (`permissions.sql`) — no UI yet
+
+Core provisions `ctx.sql` only when a row exists in `plugin_sql_grants` whose
+`ledger` matches the manifest exactly.
+
+> **Core ships no surface for this.** Not a UI, not an API route —
+> `middleware/src/platform/pluginSqlGrants.ts` says so twice in its own source:
+> *"`plugin_sql_grants` still has no shipped grant surface — nothing in `src/`
+> calls `grant()`."* There is a hardcoded ramp for four **bundled** core
+> plugins; `@omadia/dev-platform` is installed, not bundled, so it is not on it
+> and could not be.
+
+Until core ships one, insert the row by hand:
+
+```sql
+INSERT INTO plugin_sql_grants (plugin_id, ledger, granted_by)
+VALUES ('@omadia/dev-platform',
+        'plg_omadia_dev_platform_migrations',
+        'you@example.com');
+```
+
+Then restart the middleware. The ledger name must match
+`permissions.sql.ledger` character for character — core compares the two and
+treats any difference as no grant at all.
+
+The name is not arbitrary: core derives `plg_<sanitized-plugin-id>_` from the id
+*it* knows and rejects anything outside it. `plg_` is kernel-reserved so no core
+table can live there, and the folded id means one plugin cannot nominate
+another's ledger and forge its migration history.
+
+### 4.2 The public-path grants (`permissions.public_paths`)
+
+Three prefixes are served without a kernel session, because the caller has none
+to present. Each is still authenticated:
+
+| Prefix | Authenticated by |
+|---|---|
+| `/api/v1/dev-runner` | A per-job bearer token, verified inside the router. |
+| `/api/webhooks/github` | HMAC-SHA256 over the raw request body. |
+| `/api/v1/dev-platform` | The GitHub App manifest-conversion callback, bound to a kernel-signed, plugin-audience state token. |
+
+This grant **does** have a shipped surface, behind operator auth:
+
+```bash
+# What the plugin asks for, and what you have already granted
+curl -X GET "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths"
+
+# Grant. This is the COMPLETE set — omitting a prefix revokes it.
+curl -X PUT "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths" \
+  -H 'Content-Type: application/json' \
+  -d '{"paths":["/api/v1/dev-runner","/api/webhooks/github","/api/v1/dev-platform"]}'
+```
+
+Consent cannot exceed the declaration — core rejects with
+`runtime.public_path_not_declared` any prefix this manifest does not request, so
+the consent endpoint can never itself be used to make an arbitrary URL public.
+
+Without these grants: the runner cannot phone home, webhooks 401, and GitHub App
+onboarding cannot complete.
+
+## 5. Credentials — you enter these yourself
+
+**Nothing is migrated for you, and that is deliberate.** The plugin stores
+credentials in its own vault namespace, so after installing — and after any
+reinstall — you re-connect each repository by hand.
+
+A one-time core migration hook was rejected because it would move credentials
+silently. The right moment to notice that a GitHub App private key has entered a
+plugin's namespace is *while it is happening*, not during an incident.
+
+What the plugin holds:
+
+| Secret | Written when | Used for |
+|---|---|---|
+| GitHub App private key (PEM) | You register or bind a GitHub App | Minting short-lived installation tokens |
+| GitHub App client secret | App registration | The OAuth leg of App setup |
+| GitHub App webhook secret | App registration | HMAC over the raw webhook body |
+| Per-repo clone token (PAT) | You connect a repo with a PAT | Read-only clone inside the runner |
+| Per-repo device-flow token | You complete the device flow | Same |
+
+**Steps.** Open **Dev Platform → Repositories** and connect a credential per
+repo:
+
+- **GitHub App — recommended.** The runner receives a freshly minted,
+  single-repository, read-only installation token that is revoked when the job
+  ends. No long-lived credential ever reaches the runner.
+- **PAT** — scope it to the one repository.
+- **Device flow** — currently **dormant**: `activate()` passes no device-flow
+  provider, so `POST /repos/:id/connect/device*` answers `503
+  devplatform.device_flow_unconfigured`. PAT and App onboarding are unaffected.
+
+Until a repo has a credential, its jobs fail at clone — visibly, at job start.
+
+**Rotation** is the same action as entering one: re-connect the repository, or
+re-bind the App. The old value is replaced in place; jobs already running keep
+the installation token they were minted, which expires on its own.
+
+Two secrets belong to the deployment rather than the plugin, and live in
+`docker-compose.dev-platform.yaml`:
+
+- `DEV_RUNNER_DAEMON_TOKEN` — a **comma-separated list**, for zero-downtime
+  rotation. Both ends accept every token in the list and send the first, so the
+  procedure is: prepend the new token → restart → drop the old one.
+- The LLM provider key the proxy forwards with.
+
+Uninstall and purge never reach into the vault — deleting credentials is the
+host's operation on the host's namespace. Remove them through your host's secret
+management once the plugin is gone.
+
+## 6. Choosing a runner backend
+
+Backends register only when their prerequisites are configured. Everything is
+**off by default** — a missing token means "not registered", never "registered
+and insecure".
+
+### Docker / compose (`kind=docker`) — the default
+
+Selected by `DEV_PLATFORM_BACKEND` (default `docker`; only the literal `local`
+selects otherwise). Registers when `DEV_RUNNER_DAEMON_URL` **and**
+`DEV_RUNNER_DAEMON_TOKEN` are both set.
+
+```bash
+docker compose \
+  -f /path/to/omadia/docker-compose.yaml \
+  -f /path/to/omadia-dev-platform/docker-compose.dev-platform.yaml up -d
+```
+
+Four services, and the separation between them is the security model:
+
+- **`dev-runner-daemon`** — the only holder of docker credentials.
+- **`dev-dind`** — the nested engine; the only `privileged: true` service in the
+  whole stack. Internal networks only, no host port, TLS-only (the daemon
+  refuses a plaintext 2375 engine).
+- **`dev-egress-proxy`** — default-deny, the only path from a job container to
+  the internet. Pinned at `172.28.5.3` because job containers are created by
+  dind and never see compose DNS.
+- **`middleware`** — gains **no** docker socket, **no** `DOCKER_HOST` and no
+  route to `dev-engine`. The compose-topology test asserts that absence; it is
+  the single most important property of that file.
+
+Set `DEV_EGRESS_BASE_ALLOWLIST` to include your package registry. Without a
+registry route an auto-detected `npm ci` **hangs** against the proxy's
+default-deny rather than failing cleanly.
+
+### Fly Machines (`kind=fly`) — the hosted path
+
+One ephemeral Machine per job. Registered only when `DEV_FLY_RUNNER_APP` is set
+*and* a runner image is configured; it is additive and orthogonal to
+`DEV_PLATFORM_BACKEND`.
+
+```bash
+flyctl apps create <runner-app> --org <org>
+# then store a Fly deploy token SCOPED TO THAT APP in Vault
+```
+
+Two boot-time refusals, both of which log and simply skip registration:
+
+- `DEV_FLY_RUNNER_APP` equal to this app's `FLY_APP_NAME` — refusing to
+  provision runners into the middleware's own app.
+- `DEV_FLY_RUNNER_APP` set but no runner image.
+
+Missing token → `devplatform.fly_deploy_token_missing`. The token is read from
+Vault per API operation, never held on the instance. Endpoint selection is
+automatic: on Fly, the internal Machines API; off Fly, `api.machines.dev`.
+
+Sizing: `DEV_FLY_REGION`, `DEV_FLY_GUEST_CPUS` (1), `DEV_FLY_GUEST_MEMORY_MB`
+(1024), `DEV_FLY_MAX_CPUS` (4), `DEV_FLY_MAX_MEMORY_MB` (8192).
+
+### Local process (`kind=local`) — development only
+
+`DEV_PLATFORM_BACKEND=local`, plus setup fields `unsafe_local: true` **and**
+`unsafe_local_uid`. Agent-written code then runs on the middleware host itself.
+A missing uid is a hard activation refusal, not a warning.
+
+## 7. Migration handoff
+
+If you ran the Dev Platform *inside* core, migration slots 0022–0030 are already
+applied and recorded in **core's** ledger. This plugin's ledger starts empty, so
+without a handoff `runMigrations()` re-applies all nine.
+
+`ctx.sql.seedLedger()` records them as applied instead — but never on core's
+word. Each of the nine files carries a **witness** proving the schema object it
+creates is actually present.
+
+The case that makes this necessary is *rows present, tables absent*: a restore
+from a snapshot older than the migrations, a version-skewed rollback, an
+operator who dropped a table during an incident. A handoff that trusted core's
+rows would activate green and 500 on every request. With witnesses the seed
+declines, the migration runner applies the files, and that is the repair.
+
+### Dry-run it against production first
+
+`handoff-plan.json` ships in the ZIP precisely so you can see the plan against
+your real database **before** the plugin is installed and before a single row is
+written. Core ships the CLI (`middleware/scripts/plugin-ledger-handoff.mjs`,
+epic #470 C11):
+
+```bash
+cd /path/to/omadia/middleware
+npm run build                      # the CLI imports from dist/
+
+DATABASE_URL=postgres://…/omadia \
+node scripts/plugin-ledger-handoff.mjs \
+  --plan /path/to/omadia-dev-platform/packages/plugin/handoff-plan.json
+```
+
+| Flag | Effect |
+|---|---|
+| `--plan <file>` | **Required.** `migrationsDir` inside it is resolved relative to the plan file, so a plan copied out of the ZIP works from wherever you put it. |
+| *(none)* | **Dry run — the default.** `--apply` is the only way to write. The inverse default would be wrong for a tool whose whole value is being run against production by someone who has not read it. |
+| `--apply` | Actually writes the ledger rows. |
+| `--database-url <url>` | Overrides `$DATABASE_URL`. |
+| `--json` | Machine-readable report. |
+
+Exit codes: **0** plan computed (or applied) · **1** the handoff refused · **2**
+usage or plan-file error.
+
+The dry run costs one read-only transaction, and that is literally true rather
+than a claim: witnesses execute inside a read-only subtransaction over
+PostgreSQL's extended protocol, so a multi-statement witness is refused by the
+server before it can escape the dry run, and a writing witness is refused before
+it can touch the donor ledger or any bystander table.
+
+The CLI names no plugin and no table — the plan file supplies the id, the
+ledger, the migrations directory and the entries. That is core's decoupling
+ratchet at work, not tidiness: no core file may name the extracted plugin.
+
+**Reading the report.** `seeded` were adopted on proof · `applied` were left for
+the migration runner · `alreadySeeded` were already in this plugin's ledger ·
+**`skippedNoWitness` is the alarm** — the donor ledger records them, but their
+witness says the schema object is absent. On a healthy installation it is empty
+and the CLI prints `✓ no disagreement between the donor ledger and the live
+catalog`. When it is not empty the CLI is explicit that this is the handoff
+working, not failing: the migration runner will apply those files and that is
+the repair. Confirm the database is the one you think it is before continuing.
+
+Running the CLI is optional — installing the plugin performs the same handoff
+itself. It exists so the most irreversible-looking step of the epic can be read
+before it is taken.
+
+Since 0.3.1 the manifest also declares `permissions.sql.handoff`, so a core with
+`@omadia/plugin-api` 1.6.0 or newer runs this plan **before** its own migration
+runner and the handoff reports real numbers. **On an older core the key is
+ignored** — the pre-activate migration run gets there first, `seedLedger` can
+only answer `alreadySeeded`, and `skippedNoWitness` never fires. That is exactly
+when running the dry run by hand is worth it: it is the only way to see the
+disagreement. See G7 in §12.
+
+## 8. Optional capabilities and what you lose
+
+Four capabilities are declared `optional_requires`. The plugin installs and runs
+without them; each absence is logged, none is silent.
+
+**The registry does not carry this.** The hub reads `requires`, `provides` and
+`depends_on` and never `optional_requires`, so the storefront cannot show it.
+
+| Capability | Absent means |
+|---|---|
+| `turnContext@1` | The three chat tools (`dev_job_start`, `dev_job_status`, `dev_job_list`) are **not registered at all**. They authorize per call against the human driving the turn; with no envelope there is nothing to authorize against. Registering tools that refuse every call is worse — the model keeps retrying and the refusals read as a bug. Use the operator UI. |
+| `githubAppJwt@1` | Falls back to a local RS256 signer. Functionally equivalent; the cost is a duplicated security primitive. Core publishes no provider today. |
+| `usageTelemetry@1` | No rows in the operator cost dashboard. **Per-job budgets keep enforcing** — they meter the plugin's own tables. Drops are counted and reported at deactivate. |
+| `conductorRoles@1` | Repositories whose approver is a **role** open gates nobody can approve; the job waits until its deadline expires. Fail-closed, the safe direction. **Workaround: configure a named user approver.** This is the largest functional gap. |
+
+## 9. Supply chain
+
+The runner image is `ghcr.io/byte5ai/omadia-dev-runner`, published only by
+`.github/workflows/release-runner-image.yml` on a tag push or manual dispatch —
+never on a branch push. Signing is keyless (Fulcio + Rekor) and always over the
+immutable **digest**, never a tag. `sidecars/dev-runner-daemon/src/imageVerify.mjs`
+verifies at daemon boot.
+
+Because the image was previously published by core, verification accepts either
+signer during the transition:
+
+```
+^(?:https://github\.com/byte5ai/omadia/\.github/workflows/publish-images\.yml|https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml)@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$
+```
+
+Two deliberate properties. It is **anchored at both ends** — cosign compiles
+with Go RE2 and matches *unanchored*, so without `^…$` a URL like
+`https://evil.example/?x=<a valid identity>` would satisfy it. And it is
+**narrow**: two exact repo+workflow pairs, never "anything under `byte5ai`".
+
+| Configuration | cosign flag |
+|---|---|
+| `DEV_IMAGE_COSIGN_IDENTITY_REGEXP` set | `--certificate-identity-regexp <yours>` — validated at boot; unanchored or uncompilable is a refusal naming the variable |
+| `DEV_IMAGE_COSIGN_IDENTITY` set to one of the two signers | `--certificate-identity-regexp <transition>` — widened, logged loudly once per boot |
+| `DEV_IMAGE_COSIGN_IDENTITY` set to anything else | `--certificate-identity <yours>` |
+| Neither set | verification **skips**, with a warning |
+
+`DEV_IMAGE_COSIGN_ISSUER` must be set in any enforcing configuration — a regexp
+alone is not a pin. `DEV_IMAGE_VERIFY=off` is the only full escape hatch.
+
+Verify by hand:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/byte5ai/omadia-dev-runner@sha256:<digest>
+
+cosign verify-attestation --type spdxjson \
+  --certificate-identity-regexp '<same>' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/byte5ai/omadia-dev-runner@sha256:<digest>
+```
+
+**On Fly there is no pull hook for cosign** — the platform pulls the image
+itself at deploy time. The guarantee there is digest pinning in the daemon
+config plus the CI-verified signature at release. Boot-time verification still
+runs everywhere the daemon can reach the registry.
+
+The plugin ZIP deliberately ships **no runner shim**: a second copy would create
+a parallel provenance path verified by nothing, since the hub checks no
+signature and the ZIP carries no attestation.
+
+**One release after the first publish from this repository**, narrow the regexp
+to this repo alone — the code is written so that is a deletion, not a rewrite.
+
+## 10. Uninstall and purge
+
+**Uninstall never drops a table.** `close()` disposes routes, tools, nav entries
+and background loops; it touches no schema, so a reinstall is lossless
+(measured: ledger 9 with 0 re-applied, rows intact, routes back to 200).
+
+What stops: routers unmount, the nav entry disappears, background workers stop,
+and granted public paths stop being honoured (`/api/v1/dev-runner/...` goes
+200 → 404).
+
+What survives: all nine `dev_*` tables and every row, plus the migration ledger.
+
+> Grant rows are **not** revoked on uninstall — `plugin_sql_grants` and
+> `plugin_public_path_grants` keep their rows. Orphaned, not a live hole: the
+> runtime stops honouring them. The lifecycle decision is still open upstream.
+
+To actually destroy the data, call the purge route — explicit, destructive and
+type-to-confirm:
+
+```bash
+curl -X POST "$BASE/api/v1/admin/dev-platform/admin/purge" \
+  -H 'Content-Type: application/json' \
+  -d '{"confirm":"@omadia/dev-platform"}'
+```
+
+Without the confirm phrase you get `400 devplatform.purge_not_confirmed` and the
+message spelling out what would be destroyed. It drops all nine tables in one
+transaction, in dependency order, without `CASCADE` — and the ledger with them,
+because tables dropped while the ledger stays populated is the single worst end
+state available here.
+
+Purge does not touch the vault (§5).
+
+## 11. Troubleshooting
+
+**A changed ZIP had no effect.** You re-uploaded the same `id@version`. The
+module was reused from Node's ESM cache. Restart the middleware, and bump the
+version next time.
+
+**`install.missing_capability` (HTTP 409).**
+
+```
+plugin requires capabilities not yet provided: <names>
+```
+
+A hard `requires:` entry has no *declared* provider. Note the sharp edge:
+`details.available_providers: []` means "nobody declares providing this" — the
+resolver reads manifest `provides:`, while `services.get` reads the live
+registry, so a capability can exist at runtime and still fail this gate. For
+this plugin only `graphPool@1` can trigger it; the other four moved to
+`optional_requires` in 0.3.0.
+
+**Activation fails naming the ledger.** The ledger must sit inside
+`plg_omadia_dev_platform_` and match `permissions.sql.ledger` exactly. A grant
+row with a different ledger name is not a partial grant — it is no grant.
+
+**Every route 404s but the plugin reports `status: "active"`.** Known core bug
+(G4, §12). The install path writes `status: 'active'` before running the
+`onInstalled` hook and never revises it when the hook throws. Check the
+middleware log rather than the status field; the boot path is correct.
+
+**Runner starts, then every request inside it fails with 407.** An empty
+`DEV_RUNNER_DAEMON_TOKEN` — the daemon authenticates to its own egress proxy as
+`Bearer undefined`. Inside a runner this presents as a total network outage. Now
+a boot refusal, so check the daemon's startup log.
+
+**`npm ci` inside a job hangs.** The egress proxy is default-deny and your
+package registry is not in `DEV_EGRESS_BASE_ALLOWLIST` (default
+`registry.npmjs.org`).
+
+**The proxy answers 500 with no policy.** `llm_allowed_models` is empty. From
+inside the runner this is indistinguishable from a wiring bug — set it.
+
+**Role-approver gates can never be approved.** `conductorRoles@1` has no
+provider. Configure a named user approver (§8).
+
+**Device-flow connect returns 503.** Expected — `devplatform.device_flow_unconfigured`.
+Use a GitHub App or a PAT.
+
+## 12. Known open issues
+
+| # | Issue | Status |
+|---|---|---|
+| **G4** | A failed activation still reports `status: "active"`. The install path writes the status before the `onInstalled` hook and never revises it. Makes every other verdict less trustworthy. | **Open** in core |
+| **G6** | Core's `publicPaths.ts` carried two static dev-platform exemptions that collided with this plugin's declarations. This single residue caused all 33 failures of the 2026-08-21 run against `main`. | **Fixed on core `main`** — C12, core PR #807 (`e1e31f62`, 2026-08-21). Use a core at or after that commit. |
+| **G7** | Core's pre-activate migration run happened **before** `activate()`, pre-empting the C11 handoff: `seedLedger` found all nine already applied and `skippedNoWitness` — the one alarm the feature exists to raise — never fired. The 2026-08-21 run measured `0 seeded, 9 already seeded` on the exact upgrade the feature was built for, and nothing went red. | **Fixed in 0.3.1** (C15, core issue byte5ai/omadia#814). `permissions.sql.handoff` declares the plan so the **kernel** runs it ahead of its own migration runner. Needs core with `@omadia/plugin-api` **1.6.0**; on anything older the key is ignored and the `activate()` fallback still runs — so on a core below 1.6.0 the gap remains, and the §7 dry run is the way to see it. |
+
+Acceptance runs:
+
+| Run | Against | Outcome |
+|---|---|---|
+| [`ACCEPTANCE-RUN-2026-08-20.md`](./ACCEPTANCE-RUN-2026-08-20.md) | 0.2.0 vs. a **patched** core | 71 PASS / 0 FAIL / 2 BLOCKED. Found G1–G6. |
+| [`ACCEPTANCE-RUN-2026-08-21.md`](./ACCEPTANCE-RUN-2026-08-21.md) | 0.3.0 vs. **plain** `origin/main`, no patches | 38 / 33 / 2 on `main`; **71 / 0 / 2** with C12. All 33 failures traced to G6 alone. 1,316 tests green. |
+
+Both reproduce with `node scripts/acceptance-local.mjs` (exit code equals the
+FAIL count), driven by `BASE_URL` and `DATABASE_URL`.
+
+## See also
+
+- [`SECRETS.md`](./SECRETS.md) — the full credential list and rotation
+- [`SUPPLY_CHAIN.md`](./SUPPLY_CHAIN.md) — signing, SBOM, the narrowing step
+- [`../packages/plugin/SEAMS.md`](../packages/plugin/SEAMS.md) — every core seam
+  and its degradation
+- [`iframe-credentials.md`](./iframe-credentials.md)
