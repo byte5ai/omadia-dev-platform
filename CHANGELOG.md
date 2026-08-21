@@ -9,6 +9,49 @@ project versions the ARTIFACT, not the repository: a release is a ZIP an
 operator can install, so anything that does not change the ZIP does not get a
 version.
 
+## 0.3.2 — 2026-08-21
+
+The runner image is now published **automatically from this repository**. No
+plugin code changed; the artifact is re-cut because the image an operator is
+told to pin has a new name.
+
+### Changed
+
+- **The runner image is `ghcr.io/byte5ai/omadia-dev-platform-runner`** (was
+  `ghcr.io/byte5ai/omadia-dev-runner`), and it builds on every runner-relevant
+  push to `main` (`:main`, `:sha-<short>`) and on every `v*` tag (`:<version>`,
+  `:latest`). Previously it built never.
+
+  The old package was created by — and therefore owned by — `byte5ai/omadia`.
+  GitHub scopes a container package to its creating repository, so this repo's
+  `packages: write` token was necessary and **not sufficient**: the package also
+  had to grant this repository write access, an org-level action nobody had
+  taken. The workflow was consequently `workflow_dispatch`/tag-only so the gap
+  would not become permanently red CI, and the image was never built once.
+
+  Renaming to a package this repository creates on first push makes the
+  permission true by construction. Nothing to grant, so nothing to wait for.
+
+  **Operators must repoint `DEV_RUNNER_IMAGE` / `DEV_RUNNER_ALLOWED_IMAGES` at
+  the new repository.** The old name will not receive further builds.
+
+- **`verify` job.** The workflow now pulls the digest it just pushed and runs
+  `cosign verify` with the identical regexp the daemon ships as its default, so
+  a publisher/consumer drift fails a CI job instead of a daemon refusing to boot
+  on someone else's deployment. Provenance is attested once, explicitly
+  (`cosign attest` + `actions/attest-build-provenance`), rather than twice.
+
+- **`linux/amd64` only.** arm64 would build, under QEMU, at roughly an order of
+  magnitude more wall-clock — charged to every merge now that the build is
+  automatic, for an architecture no job runs on. If an arm64 consumer appears it
+  gets a native `ubuntu-24.04-arm` matrix leg, not an emulated platform.
+
+### Known
+
+- A brand-new GHCR package is **private** regardless of repository visibility.
+  The publish job attempts to flip it and prints the exact command when the
+  workflow token is not enough; making it public is a one-time org-owner action.
+
 ## 0.3.1 — 2026-08-21
 
 Declares the ledger handoff in the manifest so the KERNEL performs it, closing

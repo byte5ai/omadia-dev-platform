@@ -1,25 +1,39 @@
 name: release-runner-image
 
-# Publishes `ghcr.io/byte5ai/omadia-dev-runner` from THIS repository, signed
-# keylessly with cosign and carrying an SPDX SBOM attestation.
+# Publishes `ghcr.io/byte5ai/omadia-dev-platform-runner` from THIS repository,
+# signed keylessly with cosign, carrying an SPDX SBOM attestation and a GitHub
+# build-provenance attestation.
 #
-# ## Why the triggers are what they are
+# ## Why the package is named after THIS repository
 #
-# Tag pushes and manual dispatch only — deliberately NOT `on: push` to a branch.
+# The image used to be `ghcr.io/byte5ai/omadia-dev-runner` — a package CREATED
+# BY, and therefore OWNED BY, `byte5ai/omadia`. GitHub scopes a container
+# package to its creating repository, so `packages: write` here was necessary
+# and not sufficient: the push also needed that package's admin settings to
+# grant this repository the `write` role. Nobody made that grant, so the image
+# was never built even once, and the workflow was written to be run by hand so
+# the gap would not turn into permanently red CI.
 #
-# Cross-org GHCR package write cannot be verified without actually pushing, and
-# this repository has never pushed to `ghcr.io/byte5ai/omadia-dev-runner` before:
-# the package exists and is owned by byte5ai/omadia, which published it until
-# now. GitHub scopes a package to the repository that created it, so the first
-# push from here needs the package's admin settings to grant this repository
-# write access (Package settings → Manage Actions access → add
-# byte5ai/omadia-dev-platform with the `write` role). Until someone does that,
-# the push step 403s.
+# That traded a build nobody could run for a permission nobody would grant. The
+# fix is to stop asking: `omadia-dev-platform-runner` does not exist yet, and
+# GitHub CREATES a package under the org for the repository that first pushes
+# it, with that repository already granted write access. The name makes the
+# permission true by construction, so the build can be automatic — which is the
+# actual requirement. No org-level action, no manual step.
 #
-# So the workflow is written to be RUN ON PURPOSE, by a person who can read the
-# result, rather than to fire on every merge and turn a permissions gap into
-# permanent red CI. `dry_run` publishes nothing and exercises the build, which is
-# the cheapest way to find out whether the rest of the pipeline works.
+# ## Triggers
+#
+# | Trigger | Builds | Tags |
+# |---|---|---|
+# | push to `main` touching a runner path | yes | `main`, `sha-<short>` |
+# | push tag `v*` | yes | `<version>`, `v<version>`, `<minor>`, `v<minor>`, `latest`, `sha-<short>` |
+# | `workflow_dispatch` | yes | `edge` + `sha-<short>`, or the version you type |
+#
+# The runner-path gate lives in the `decide` JOB rather than in `on.push.paths`
+# on purpose. A `paths:` filter applies to every push the workflow accepts,
+# TAG PUSHES INCLUDED — and a release tag usually sits on a commit that touched
+# no runner path, so `paths:` would silently skip the one build that matters
+# most. A job that states its reasoning in the log cannot fail that quietly.
 #
 # ## Verify side
 #
@@ -27,42 +41,117 @@ name: release-runner-image
 # (`sidecars/dev-runner-daemon/src/imageVerify.mjs`). Because the signer moved
 # from byte5ai/omadia to this repository, the certificate identity CHANGED — see
 # docs/SUPPLY_CHAIN.md for the transition regexp that accepts both, and for the
-# narrowing step that removes the old one a release later.
+# narrowing step that removes the old one a release later. The `verify` job at
+# the bottom re-checks the published digest with that exact regexp, so a drift
+# between publisher and consumer fails CI here instead of a daemon somewhere
+# else, days later, refusing to boot.
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release tag to stamp, e.g. v0.3.0 (empty = edge build, :edge + :sha-<short>)'
+        description: 'Release tag to stamp, e.g. v0.3.2 (empty = edge build, :edge + :sha-<short>)'
         required: false
         type: string
         default: ''
       dry_run:
-        description: 'Build only — do not push, sign or attest. Use this to prove the pipeline before GHCR access is granted.'
+        description: 'Build only — do not push, sign or attest.'
         required: false
         type: boolean
         default: false
 
 permissions:
   contents: read
-  # Push to ghcr.io/byte5ai/*. This is the ceiling the job can ask for; the
-  # PACKAGE must also grant this repository write access (see above) — a
-  # `packages: write` token is necessary and not sufficient for a package another
-  # repository owns.
+  # Push to ghcr.io/byte5ai/omadia-dev-platform-runner. Because that package is
+  # created by this repository's first push, this permission is now sufficient
+  # on its own — see the header.
   packages: write
   # Keyless cosign mints its certificate from the workflow's ambient GitHub OIDC
   # token. No key material anywhere; the identity IS the workflow ref.
   id-token: write
+  # `actions/attest-build-provenance` writes the SLSA provenance attestation.
+  attestations: write
 
 env:
-  IMAGE: ghcr.io/byte5ai/omadia-dev-runner
+  IMAGE: ghcr.io/byte5ai/omadia-dev-platform-runner
 
 jobs:
-  publish:
+  # ── Should this push build an image at all? ────────────────────────────────
+  decide:
     runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.gate.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The gate diffs `github.event.before`..`github.sha`; a shallow clone
+          # does not contain `before`.
+          fetch-depth: 0
+
+      - name: Decide whether a runner path changed
+        id: gate
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # Tag pushes and manual dispatch always build: a release is asked for
+          # explicitly, and nothing about the diff should be able to veto it.
+          if [ "${GITHUB_EVENT_NAME}" != "push" ] || [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::${GITHUB_EVENT_NAME}/${GITHUB_REF_TYPE} — building unconditionally"
+            exit 0
+          fi
+
+          # A branch push. Build only when something that ends up in the image,
+          # or something that defines how the image is published and verified,
+          # actually changed:
+          #
+          #   sidecars/dev-runner/**        the Dockerfile itself
+          #   packages/runner-shim/**       compiled INTO the image
+          #   sidecars/dev-runner-daemon/** the consumer of the signature: it
+          #                                 owns DEFAULT_TRANSITION_IDENTITY_REGEXP
+          #                                 and the drift guard against this file
+          #   this workflow                 how the image is built at all
+          #
+          # Unknown or unreachable `before` (first push on a branch, force-push,
+          # a rewritten history) builds rather than skips. Guessing "nothing
+          # changed" from a diff we could not compute is the failure mode that
+          # leaves an operator pinned to an image that was never rebuilt.
+          if [ -z "${BEFORE}" ] || [ "${BEFORE}" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::previous commit '${BEFORE}' is unavailable — building rather than guessing"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "${BEFORE}" "${GITHUB_SHA}" -- \
+            'sidecars/dev-runner/' \
+            'sidecars/dev-runner-daemon/' \
+            'packages/runner-shim/' \
+            '.github/workflows/release-runner-image.yml')"
+
+          if [ -n "${changed}" ]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            echo "Runner-relevant changes:"
+            echo "${changed}"
+          else
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::no runner-relevant path changed in ${BEFORE}..${GITHUB_SHA} — skipping the image build"
+          fi
+
+  publish:
+    needs: decide
+    if: needs.decide.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      pushed: ${{ steps.mode.outputs.push }}
+      tags: ${{ steps.tags.outputs.tags }}
     steps:
       - uses: actions/checkout@v4
 
@@ -108,13 +197,17 @@ jobs:
             # image by digest, and an immutable tag is what makes that digest
             # findable again later.
             tags="${IMAGE}:${bare},${IMAGE}:v${bare},${IMAGE}:${minor},${IMAGE}:v${minor},${IMAGE}:latest,${IMAGE}:sha-${short}"
+          elif [ "${GITHUB_REF_TYPE}" = "branch" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
+            # The continuously-published head of main. `:main` is the floating
+            # ref an operator tracking trunk points at; `:sha-<short>` is the
+            # immutable one that makes any given digest findable again.
+            tags="${IMAGE}:main,${IMAGE}:sha-${short}"
           else
             tags="${IMAGE}:edge,${IMAGE}:sha-${short}"
           fi
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
           echo "${tags}"
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -127,17 +220,30 @@ jobs:
 
       # Repo-root context: the Dockerfile compiles `packages/runner-shim` in a
       # build stage rather than shipping a second copy of its source.
+      #
+      # linux/amd64 ONLY. The Dockerfile is arch-agnostic and node:22-slim is
+      # multi-arch, so arm64 would BUILD — under QEMU, at roughly an order of
+      # magnitude more wall-clock for the apt layer, the global npm install and
+      # the tsc stage. That cost is charged to every merge to main once the
+      # build is automatic, and nothing consumes an arm64 runner image today:
+      # the daemon launches jobs on x86 hosts (Fly, compose on Linux servers).
+      # If an arm64 consumer appears, add it as a NATIVE matrix leg on
+      # `ubuntu-24.04-arm` plus a manifest merge — not as a QEMU platform.
+      #
+      # provenance/sbom are off here on purpose: attestation is done once,
+      # explicitly, below (cosign attest + actions/attest-build-provenance).
+      # Two provenance mechanisms produce two answers to the same question.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./sidecars/dev-runner/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: ${{ steps.mode.outputs.push == 'true' }}
           tags: ${{ steps.tags.outputs.tags }}
-          provenance: true
-          sbom: true
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -172,26 +278,46 @@ jobs:
           cosign sign --yes "$IMAGE_DIGEST"
           cosign attest --yes --predicate sbom.spdx.json --type spdxjson "$IMAGE_DIGEST"
 
-      - name: Verify the signature we just made
+      - name: Attest build provenance
         if: steps.mode.outputs.push == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # A brand-new GHCR package is PRIVATE, whatever the repository's
+      # visibility. This repo is public and the image it documents must be
+      # pullable by the operators reading those docs, so try to flip it — with
+      # the default GITHUB_TOKEN, which is very likely NOT enough (org package
+      # visibility wants an admin:packages PAT). Advisory, never fatal: a red
+      # publish job because a cosmetic setting could not be changed would be a
+      # worse outcome than a private package and a printed instruction.
+      - name: Make the package public (best effort)
+        if: steps.mode.outputs.push == 'true'
+        continue-on-error: true
         env:
-          IMAGE_DIGEST: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          # Verify with the SAME transition regexp the daemon ships as its
-          # default. A signature that the consumer would reject is not a
-          # signature — and this is the only place that can be discovered before
-          # an operator's daemon refuses to boot on it.
-          #
-          # Kept BYTE-IDENTICAL to DEFAULT_TRANSITION_IDENTITY_REGEXP in
-          # sidecars/dev-runner-daemon/src/imageVerify.mjs. The daemon suite pins
-          # that constant; this is the other end of the same contract.
-          IDENTITY_RE='^(?:https://github\.com/byte5ai/omadia/\.github/workflows/publish-images\.yml|https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml)@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$'
-          cosign verify \
-            --certificate-identity-regexp "$IDENTITY_RE" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "$IMAGE_DIGEST"
-          echo "✓ the published image verifies under the transition regexp the daemon enforces"
+          set -uo pipefail
+          if gh api -X PATCH \
+              /orgs/byte5ai/packages/container/omadia-dev-platform-runner \
+              -f visibility=public; then
+            echo "package is public"
+          else
+            {
+              echo "### ⚠️ package visibility"
+              echo
+              echo "Could not set \`omadia-dev-platform-runner\` to public with the workflow token."
+              echo "An org owner can flip it once, by hand:"
+              echo
+              echo '```'
+              echo "gh api -X PATCH /orgs/byte5ai/packages/container/omadia-dev-platform-runner -f visibility=public"
+              echo '```'
+              echo
+              echo "or: Organization → Packages → omadia-dev-platform-runner → Package settings → Change visibility."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Summary
         env:
@@ -207,4 +333,70 @@ jobs:
             echo "| pushed | \`${PUSHED}\` |"
             echo "| digest | \`${DIGEST:-—}\` |"
             echo "| tags | \`${TAGS}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The consumer's check, run against the artifact we just published ───────
+  # Not a repeat of the publish job's own verification: this pulls the pushed
+  # digest from GHCR as an operator would and checks it with the SAME regexp the
+  # daemon ships as its default. The point is that a drift between publisher and
+  # consumer fails a CI JOB, visibly, rather than failing a daemon launch on
+  # someone else's deployment days later.
+  verify:
+    needs: publish
+    if: needs.publish.outputs.pushed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Read, not write: verification must not be able to change what it checks.
+      packages: read
+    steps:
+      - uses: sigstore/cosign-installer@v3
+
+      # The package starts private, so both the pull and cosign's own registry
+      # reads need credentials. cosign picks them up from the docker config this
+      # login writes.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the published digest
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}@${IMAGE_DIGEST}"
+
+      - name: cosign verify with the regexp the daemon enforces
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Kept BYTE-IDENTICAL to DEFAULT_TRANSITION_IDENTITY_REGEXP in
+          # sidecars/dev-runner-daemon/src/imageVerify.mjs. The daemon suite pins
+          # that constant against this file; this is the other end of the same
+          # contract. Change one without the other and this job goes red.
+          IDENTITY_RE='^(?:https://github\.com/byte5ai/omadia/\.github/workflows/publish-images\.yml|https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml)@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$'
+          cosign verify \
+            --certificate-identity-regexp "$IDENTITY_RE" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${IMAGE_DIGEST}"
+          cosign verify-attestation --type spdxjson \
+            --certificate-identity-regexp "$IDENTITY_RE" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${IMAGE_DIGEST}" > /dev/null
+          echo "✓ ${IMAGE}@${IMAGE_DIGEST} verifies under the regexp the daemon enforces"
+
+      - name: Summary
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          {
+            echo "### verified"
+            echo
+            echo "\`${IMAGE}@${IMAGE_DIGEST}\`"
+            echo
+            echo "signature + SPDX attestation check out against the daemon's default identity regexp."
           } >> "$GITHUB_STEP_SUMMARY"

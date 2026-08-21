@@ -820,13 +820,13 @@ describe('egress chain — daemon registers, container connects, nothing else do
       const policyClient = createPolicyClient({
         middlewareUrl: 'http://middleware:8080',
         daemonToken: 'x'.repeat(40),
-        allowedImages: ['ghcr.io/byte5ai/omadia-dev-runner'],
+        allowedImages: ['ghcr.io/byte5ai/omadia-dev-platform-runner'],
         egressProxyUrl: `http://127.0.0.1:${p.dataPort}`,
         fetchImpl: async () =>
           new Response(
             JSON.stringify({
               jobId: CHAIN_JOB,
-              image: `ghcr.io/byte5ai/omadia-dev-runner@sha256:${'a'.repeat(64)}`,
+              image: `ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:${'a'.repeat(64)}`,
               env: {},
               egressAllowlist: ['allowed.example.com'],
             }),

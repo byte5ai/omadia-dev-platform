@@ -4,9 +4,22 @@ The dev platform runs agent-written code. The image that code runs inside is the
 single most security-relevant artifact this project ships, so it is signed at
 release and verified before any job starts.
 
-- **Image:** `ghcr.io/byte5ai/omadia-dev-runner`
-- **Published by:** [`.github/workflows/release-runner-image.yml`](../.github/workflows/release-runner-image.yml)
+- **Image:** `ghcr.io/byte5ai/omadia-dev-platform-runner`
+- **Published by:** [`.github/workflows/release-runner-image.yml`](../.github/workflows/release-runner-image.yml), automatically
 - **Verified by:** [`sidecars/dev-runner-daemon/src/imageVerify.mjs`](../sidecars/dev-runner-daemon/src/imageVerify.mjs), at daemon boot
+
+| Trigger | Tags |
+|---|---|
+| push to `main` touching `sidecars/dev-runner/**`, `sidecars/dev-runner-daemon/**`, `packages/runner-shim/**` or the workflow | `main`, `sha-<short>` |
+| push tag `v*` | `<version>`, `v<version>`, `<minor>`, `v<minor>`, `latest`, `sha-<short>` |
+| `workflow_dispatch` | `edge` + `sha-<short>`, or the version you type; `dry_run` builds and pushes nothing |
+
+Built for `linux/amd64` only. The Dockerfile is arch-agnostic and would build
+for arm64 under QEMU, at roughly an order of magnitude more wall-clock on the
+apt layer, the global npm install and the tsc stage — charged to every merge to
+`main` now that the build is automatic, for an architecture nothing consumes:
+jobs are launched on x86 hosts. An arm64 consumer means a native matrix leg on
+`ubuntu-24.04-arm` plus a manifest merge, not a QEMU platform.
 
 Signing is **keyless**. There is no private key anywhere — Fulcio issues a
 short-lived certificate bound to the publishing workflow's identity, Rekor logs
@@ -106,13 +119,13 @@ becomes permanent.
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/byte5ai/omadia-dev-runner@sha256:<digest>
+  ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:<digest>
 
 # The SPDX SBOM attestation over the same digest:
 cosign verify-attestation --type spdxjson \
   --certificate-identity-regexp '…' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/byte5ai/omadia-dev-runner@sha256:<digest>
+  ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:<digest>
 ```
 
 ---
@@ -151,21 +164,33 @@ itself, and therefore implies a workspace checkout where
 
 ---
 
-## GHCR access — unverified, and how to verify it
+## GHCR access — why the package is named after this repository
 
-`ghcr.io/byte5ai/omadia-dev-runner` was created by `byte5ai/omadia` and is owned
-by it. GitHub scopes a package to its creating repository, so a `packages: write`
-token in *this* repository is **necessary but not sufficient** — the package
-itself must also grant this repository write access:
+The image used to be `ghcr.io/byte5ai/omadia-dev-runner`, a package **created by
+and owned by `byte5ai/omadia`**. GitHub scopes a container package to its
+creating repository, so a `packages: write` token in *this* repository was
+**necessary but not sufficient**: the package's own admin settings also had to
+grant this repository the `write` role (Package settings → Manage Actions access
+→ Add repository → role **Write**). Nobody made that grant, so the runner image
+was never built — not once — and the workflow was written to be run by hand so
+the permission gap would not become permanently red CI.
 
-> Package → **Package settings** → **Manage Actions access** → **Add repository**
-> → `byte5ai/omadia-dev-platform` → role **Write**
+That traded a build nobody could run for a permission nobody would grant.
 
-This cannot be verified without actually pushing, and it has never been pushed
-from here. `release-runner-image.yml` is therefore `workflow_dispatch` + tag-push
-only, never `on: push` to a branch — a permissions gap becomes one deliberate red
-run that a person is looking at, not permanently red CI on every merge.
+`omadia-dev-platform-runner` did not exist, and GitHub creates a container
+package for the repository that first pushes it, with that repository already
+holding write access. **The name makes the permission true by construction**, so
+the build can be automatic — which was the requirement all along. No org-level
+action is needed to publish.
 
-To check it cheaply, run the workflow with **`dry_run: true`**: it builds the
-image and pushes nothing. To check the access itself, run it with `dry_run:
-false` and no version — an `:edge` publish is the smallest real push available.
+One thing is still not automatic: a brand-new GHCR package is **private**
+regardless of the repository's visibility. The publish job attempts
+
+```bash
+gh api -X PATCH /orgs/byte5ai/packages/container/omadia-dev-platform-runner -f visibility=public
+```
+
+with the workflow token, which is very likely not enough (org package visibility
+wants an `admin:packages` credential). The attempt is advisory — it never fails
+the job — and prints the same command to the run summary for an org owner to run
+once. Until then, pulling and `cosign verify` need `docker login ghcr.io`.

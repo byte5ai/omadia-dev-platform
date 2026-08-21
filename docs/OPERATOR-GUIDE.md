@@ -336,11 +336,25 @@ without them; each absence is logged, none is silent.
 
 ## 9. Supply chain
 
-The runner image is `ghcr.io/byte5ai/omadia-dev-runner`, published only by
-`.github/workflows/release-runner-image.yml` on a tag push or manual dispatch —
-never on a branch push. Signing is keyless (Fulcio + Rekor) and always over the
+The runner image is `ghcr.io/byte5ai/omadia-dev-platform-runner`, published by
+`.github/workflows/release-runner-image.yml` — automatically, with no manual
+step:
+
+| Trigger | Tags |
+|---|---|
+| push to `main` touching a runner path | `main`, `sha-<short>` |
+| push tag `v*` | `<version>`, `v<version>`, `<minor>`, `v<minor>`, `latest`, `sha-<short>` |
+| manual dispatch | `edge` + `sha-<short>`, or the version you type (`dry_run` pushes nothing) |
+
+Built for `linux/amd64`. Signing is keyless (Fulcio + Rekor) and always over the
 immutable **digest**, never a tag. `sidecars/dev-runner-daemon/src/imageVerify.mjs`
-verifies at daemon boot.
+verifies at daemon boot, and a `verify` job in the same workflow re-pulls the
+published digest and checks it with the identical regexp — so publisher/consumer
+drift fails CI rather than a daemon launch.
+
+> A brand-new GHCR package is **private** until an org owner makes it public
+> (`gh api -X PATCH /orgs/byte5ai/packages/container/omadia-dev-platform-runner -f visibility=public`).
+> Until then, pulling needs `docker login ghcr.io`.
 
 Because the image was previously published by core, verification accepts either
 signer during the transition:
@@ -370,12 +384,12 @@ Verify by hand:
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/byte5ai/omadia-dev-platform/\.github/workflows/release-runner-image\.yml@refs/(?:heads|tags)/[A-Za-z0-9._/-]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/byte5ai/omadia-dev-runner@sha256:<digest>
+  ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:<digest>
 
 cosign verify-attestation --type spdxjson \
   --certificate-identity-regexp '<same>' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/byte5ai/omadia-dev-runner@sha256:<digest>
+  ghcr.io/byte5ai/omadia-dev-platform-runner@sha256:<digest>
 ```
 
 **On Fly there is no pull hook for cosign** — the platform pulls the image

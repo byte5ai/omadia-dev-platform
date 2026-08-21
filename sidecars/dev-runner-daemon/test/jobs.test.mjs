@@ -384,7 +384,7 @@ describe('JobManager — concurrent DELETEs for the same job', () => {
 // --------------------------------------------------------------------------
 
 const DIGEST = 'sha256:2222222222222222222222222222222222222222222222222222222222222222';
-const DIGEST_IMAGE = `ghcr.io/byte5ai/omadia-dev-runner@${DIGEST}`;
+const DIGEST_IMAGE = `ghcr.io/byte5ai/omadia-dev-platform-runner@${DIGEST}`;
 
 /** @returns {import('../src/policyClient.mjs').DerivedJobPolicy} */
 function enginePolicy(image = DIGEST_IMAGE) {
@@ -635,7 +635,7 @@ describe('createDockerEngine — createJobContainer applies the clamp and provis
       () =>
         engine.createJobContainer({
           jobId: JOB_ID,
-          policy: enginePolicy('ghcr.io/byte5ai/omadia-dev-runner:latest'),
+          policy: enginePolicy('ghcr.io/byte5ai/omadia-dev-platform-runner:latest'),
           leaseExpiresAt: '2026-07-10T12:00:00.000Z',
         }),
       (err) => err instanceof SpecRejectedError && err.reason === 'image_not_digest_pinned',
@@ -779,7 +779,7 @@ describe('createDockerEngine — streamLogs and warmImages', () => {
   it('warmImages pulls each ref and returns the resolved digests', async () => {
     const docker = makeFakeDocker();
     const engine = createDockerEngine({ docker, env: {} });
-    const digests = await engine.warmImages(['ghcr.io/byte5ai/omadia-dev-runner:v1', 'registry.npmjs.org/x:2']);
+    const digests = await engine.warmImages(['ghcr.io/byte5ai/omadia-dev-platform-runner:v1', 'registry.npmjs.org/x:2']);
     assert.deepEqual(digests, [DIGEST, DIGEST]);
     assert.equal(docker.state.events.pulled.length, 2, 'both refs were pulled');
   });

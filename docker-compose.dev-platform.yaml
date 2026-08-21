@@ -63,7 +63,7 @@ services:
       # container (i.e. the implement phase; analyze/plan/clarify run without
       # one). Same source var as the daemon's own DEV_RUNNER_IMAGES below, so
       # both sides always agree on which image a job runs.
-      DEV_RUNNER_DEFAULT_IMAGE: ${DEV_RUNNER_IMAGE:-ghcr.io/byte5ai/omadia-dev-runner:latest}
+      DEV_RUNNER_DEFAULT_IMAGE: ${DEV_RUNNER_IMAGE:-ghcr.io/byte5ai/omadia-dev-platform-runner:latest}
       # The LLM proxy's model allowlist (spec §5, wireDevPlatform.ts). An empty
       # list is a deliberate fail-closed default (config.ts: "always mounted;
       # an empty allowlist ⇒ it answers 500 'no LLM policy'"), so this is a
@@ -135,8 +135,8 @@ services:
 
       # The image allowlist is the boundary a compromised middleware cannot cross:
       # it may name a job, never an image. The daemon REFUSES TO BOOT without it.
-      DEV_RUNNER_ALLOWED_IMAGES: ${DEV_RUNNER_ALLOWED_IMAGES:-ghcr.io/byte5ai/omadia-dev-runner}
-      DEV_RUNNER_IMAGES: ${DEV_RUNNER_IMAGE:-ghcr.io/byte5ai/omadia-dev-runner:latest}
+      DEV_RUNNER_ALLOWED_IMAGES: ${DEV_RUNNER_ALLOWED_IMAGES:-ghcr.io/byte5ai/omadia-dev-platform-runner}
+      DEV_RUNNER_IMAGES: ${DEV_RUNNER_IMAGE:-ghcr.io/byte5ai/omadia-dev-platform-runner:latest}
       # Digest-pinned by default (true) — the comment above used to be the ONLY
       # place this knob existed; the var was never actually forwarded into the
       # container, so `env.DEV_RUNNER_REQUIRE_DIGEST` was always undefined and

@@ -64,7 +64,7 @@ identity:
   # settled on (specs/470-dev-platform-plugin/plan.md §4.1). There is no
   # "platform" kind.
   kind: "extension"
-  version: "0.3.1"
+  version: "0.3.2"
   domain: "dev-platform"
   description: "Runs autonomous coding jobs against your GitHub repositories. An agent clones a repo into an isolated runner, drives an LLM through an analyze/plan/implement/review pipeline, and opens a pull request — bounded at every step by human approval gates, a diff policy, a per-job cost budget and an egress allowlist. Ships its own operator UI, HTTP routes, chat tools, background workers and nine database tables it migrates itself. Runners execute on Fly Machines or on local Docker; neither ever sees a long-lived credential. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470)."
   authors:

@@ -1,0 +1,37 @@
+# The dev-runner image builds from the REPO ROOT so its shim stage can compile
+# packages/runner-shim without a second copy of the source. Without this file
+# that context is the entire working tree — hundreds of megabytes of
+# node_modules and build output uploaded to the daemon on every build, and, far
+# worse, a `COPY <dir>/ ./` that would happily bake a developer's local
+# node_modules or .env into the most security-relevant image this project ships.
+#
+# Deny nothing by default is the wrong posture for an image that runs
+# agent-written code. Keep this list tight.
+
+node_modules
+**/node_modules
+
+# Build output — every stage that needs it produces it itself.
+dist
+**/dist
+.test-build
+**/.test-build
+*.tsbuildinfo
+**/*.tsbuildinfo
+packages/plugin/out
+packages/plugin/ui
+
+# Never in an image.
+.env
+.env.*
+**/.env
+**/.env.*
+
+.git
+.github
+docs
+marketing-site
+coverage
+**/coverage
+*.log
+.DS_Store

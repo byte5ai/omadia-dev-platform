@@ -1,7 +1,7 @@
 # omadia/dev-runner image
 
 Hardened per-job execution image for the dev platform (epic #470, W1 — spec §3).
-Published as `ghcr.io/byte5ai/omadia-dev-runner`.
+Published as `ghcr.io/byte5ai/omadia-dev-platform-runner`.
 
 Each dev job runs in a fresh container from this image. Inside it the **runner
 shim** (`@omadia/dev-runner-shim`, `middleware/packages/dev-runner-shim`) clones
@@ -43,7 +43,7 @@ shim is a workspace package under `middleware/packages/`:
 
 ```bash
 docker build -f middleware/sidecars/dev-runner/Dockerfile \
-  -t ghcr.io/byte5ai/omadia-dev-runner:dev .
+  -t ghcr.io/byte5ai/omadia-dev-platform-runner:dev .
 ```
 
 The shim is compiled in a builder stage (`tsc` → `dist/src/*.js`, Node builtins
@@ -54,8 +54,15 @@ workspace package.
 
 ## Publishing
 
-Built and pushed by `.github/workflows/publish-images.yml` alongside the
-middleware and web-ui images, version-locked to the middleware release: tagged
-`:<OMADIA_VERSION>` and `:sha-<gitsha>` under `ghcr.io/byte5ai`. The runner
-daemon resolves the configured tag to a digest at warm time and launches jobs by
-digest, so `latest` drift between warm and launch cannot occur.
+Built and pushed by this repository's
+[`.github/workflows/release-runner-image.yml`](../../.github/workflows/release-runner-image.yml)
+as `ghcr.io/byte5ai/omadia-dev-platform-runner`, automatically: every
+runner-relevant push to `main` publishes `:main` and `:sha-<short>`, and every
+`v*` tag publishes `:<version>` and `:latest` alongside the immutable
+`:sha-<short>`. It is no longer version-locked to a middleware release — the
+image now ships on the cadence of the code that goes into it.
+
+The runner daemon resolves the configured tag to a digest at warm time and
+launches jobs by digest, so `latest` drift between warm and launch cannot occur.
+Every published digest is keyless-signed with an SPDX SBOM attestation; see
+[`docs/SUPPLY_CHAIN.md`](../../docs/SUPPLY_CHAIN.md).

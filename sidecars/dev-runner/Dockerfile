@@ -15,18 +15,40 @@
 # compiled in-image without duplicating its source.
 
 # --- shim build stage -------------------------------------------------------
-# The shim is a Node-builtins-only workspace package (packages/
-# runner-shim). It has ONLY devDependencies (typescript/tsx/@types/node) and
-# no runtime node_modules, so we compile it with tsc and ship the emitted dist/
-# tree — no bundler, and zero runtime dependency surface in the final image.
+# The shim is a Node-builtins-only workspace package (packages/runner-shim). It
+# has no runtime dependencies at all, so we compile it with tsc and ship the
+# emitted dist/ tree — no bundler, and zero runtime dependency surface in the
+# final image.
+#
+# It also declares no devDependencies. That is not an oversight: the root
+# manifest owns ONE typescript and ONE @types/node for the whole repo (root
+# package.json, "//workspaces"), and inside the workspace the shim compiles
+# against the hoisted copy. THERE IS NO WORKSPACE IN THIS STAGE. A bare
+# `npm install` on the shim's own package.json therefore installs nothing, and
+# `npm run build` dies with `tsc: not found` — exit 127, which is exactly how
+# this image failed the first time anyone ever built it (2026-08-21). It had
+# been unbuildable since the package was extracted from core, and nothing said
+# so, because the workflow was manual and nobody ran it.
+#
+# So install the toolchain explicitly, reading the versions OUT of the root
+# manifest rather than pinning a second copy here. A compiler that can drift
+# from the one the repo type-checks with is a silently different artifact.
 FROM node:22.23.2-slim AS shim-builder
 WORKDIR /build
+COPY package.json /build/root-package.json
 COPY packages/runner-shim/package.json ./
-# No package-lock.json in the workspace package (this repo's root lockfile
-# covers it); `npm install` resolves the three pinned devDeps for the build.
-RUN npm install --no-audit --no-fund
+RUN set -eu; \
+    ts="$(node -p "require('/build/root-package.json').devDependencies.typescript")"; \
+    types="$(node -p "require('/build/root-package.json').devDependencies['@types/node']")"; \
+    echo "shim toolchain: typescript@${ts}, @types/node@${types} (from the root manifest)"; \
+    npm install --no-audit --no-fund --no-save "typescript@${ts}" "@types/node@${types}"; \
+    npx tsc --version
 COPY packages/runner-shim/ ./
 RUN npm run build
+# Fail HERE, not at container start: a stage that emits no entrypoint produces
+# an image whose first job dies on MODULE_NOT_FOUND, in production, with the
+# build long since green.
+RUN test -f dist/src/index.js
 
 # --- runtime stage ----------------------------------------------------------
 FROM node:22.23.2-slim
