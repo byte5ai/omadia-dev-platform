@@ -1,6 +1,6 @@
 {
   "name": "@omadia/dev-platform-ui",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "The Dev Platform operator SPA. Built with Vite into `packages/plugin/ui/`, shipped inside the plugin ZIP and served by core at `/p/<pluginId>/ui/` (epic byte5ai/omadia#470, P2 / C8).",

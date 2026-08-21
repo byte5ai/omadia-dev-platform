@@ -125,7 +125,20 @@ export interface DevPlatformPluginContext {
     delete?(key: string): Promise<void>;
   };
   readonly config: { get<T = unknown>(key: string): T | undefined };
-  readonly services: { get<T>(name: string): T | undefined; has(name: string): boolean };
+  readonly services: {
+    get<T>(name: string): T | undefined;
+    has(name: string): boolean;
+    /**
+     * OPTIONAL, and the optionality is the version guard — same pattern as
+     * {@link DevPlatformPluginContext.sql}'s `seedLedger`.
+     *
+     * Added in `@omadia/plugin-api` 1.4.0 (epic #470 C9, core issue #795) as the
+     * accessor an `optional_requires:` entry is consumed through. On a core that
+     * has it, an absent provider answers `undefined`; on one that does not, the
+     * fallback is `get()` inside a `try` — see {@link optionalCapability}.
+     */
+    getOptional?<T>(name: string): T | undefined;
+  };
   readonly sql?: {
     readonly ledger: string;
     runMigrations(opts?: { dir?: string }): Promise<{
@@ -499,15 +512,27 @@ async function activateInner(
     // `/p/<id>/ui/index.html?theme=&palette=&locale=`, which is where the
     // `ui/` directory in this package's ZIP is served from.
     //
-    // `encodeURIComponent` is load-bearing, not defensive. This plugin's id is
-    // SCOPED — `@omadia/dev-platform`, per `manifest.yaml` and per the charset
-    // `manifestLoader.ts:182` blesses — so it contains a `/`. Interpolated raw
-    // it would emit `/plugin-ui/@omadia/dev-platform`: two path segments, which
-    // neither the Next dynamic segment nor Express's `:pluginId` can match.
+    // NO `href` — AND THAT IS THE FIX, not a simplification. This plugin's id
+    // is SCOPED (`@omadia/dev-platform`), so the only URL that resolves is the
+    // percent-encoded one: Express's `:pluginId` and the Next dynamic segment
+    // both split on a raw `/`, making `@omadia/dev-platform` two segments that
+    // match nothing (measured in the P5 run: encoded 200, raw 404). But core's
+    // `HREF_SEGMENT` is the RFC 3986 unreserved set and refuses `%`, and #798
+    // deliberately KEPT it strict — the shell decides "core destinations win"
+    // by comparing hrefs for string equality, and admitting `%xx` would weaken
+    // every literal href to fix the one path core can spell for itself.
+    //
+    // So a hand-built href here is not merely inelegant, it is unregisterable:
+    // `registerNav` throws, the throw propagates out of `activateInner`, and
+    // the plugin does not activate at all. That was gap G5 of the 2026-08-20
+    // acceptance run, and it was closed in C9 by giving the two rules a place
+    // to meet: the plugin declares `pluginUi: true` and the KERNEL renders
+    // `pluginUiHref(id)` from the id it already holds. Byte-identical URL, and
+    // no plugin ever spells a percent-encoded href again.
     disposers.push(
       ctx.uiRoutes.registerNav({
         navId: 'devPlatform',
-        href: `/plugin-ui/${encodeURIComponent(DEV_PLATFORM_PLUGIN_ID)}`,
+        pluginUi: true,
         cluster: 'adminCluster',
         order: 50,
         label: { en: 'Dev Platform', de: 'Dev-Plattform' },
@@ -582,10 +607,24 @@ async function activateInner(
 /**
  * Resolve an OPTIONAL host capability.
  *
- * `ctx.services.get` throws `ServiceNotDeclaredError` when the manifest does not
- * declare the name — a manifest bug, not a missing provider — and the two must
- * not be reported the same way. Catching here keeps a declaration mistake from
- * reading as "this core is too old", while still surfacing it in the log.
+ * Four of the five capabilities this plugin reaches for are survivable when
+ * absent, and the manifest says so: they sit under `optional_requires:` rather
+ * than `requires:` (core issue #795, epic #470 C9). Two gates read those lists
+ * differently — the capability resolver and the install gate consider
+ * `requires:` ONLY — so an `optional_requires:` entry can never keep this
+ * plugin from installing or activating, which is the whole point of the split.
+ *
+ * `getOptional` is the accessor that pairs with it: declared-but-unprovided
+ * answers `undefined` instead of throwing. It arrived with the manifest key, in
+ * plugin-api 1.4.0, so it is called through an optional-method guard — on an
+ * older core the fallback is `get()` inside a `try`, which is what this function
+ * did before C9 and still means the same thing.
+ *
+ * The `catch` stays on BOTH paths and is not paranoia. `ctx.services.get` throws
+ * `ServiceNotDeclaredError` for a name in neither list — a manifest bug, not a
+ * missing provider — and the two must not be reported the same way. Catching
+ * here keeps a declaration mistake from reading as "this core is too old", while
+ * still surfacing it in the log.
  */
 function optionalCapability<T>(
   ctx: DevPlatformPluginContext,
@@ -593,7 +632,10 @@ function optionalCapability<T>(
   log: (msg: string) => void,
 ): T | undefined {
   try {
-    return ctx.services.get<T>(name);
+    const services = ctx.services;
+    return services.getOptional
+      ? services.getOptional<T>(name)
+      : services.get<T>(name);
   } catch (err) {
     log(`[dev-platform] capability '${name}' not resolvable: ${errText(err)}`);
     return undefined;

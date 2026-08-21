@@ -1,6 +1,6 @@
 {
   "name": "@omadia/dev-runner-daemon",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "The dev-platform runner daemon: a bearer-authed control-plane HTTP API over dockerode that provisions and reaps hardened job containers inside a dedicated docker:dind engine, and the default-deny egress proxy that is the only path from a job container to the internet. STANDALONE — dockerode + zod + node builtins only, never imports the host. Moved out of omadia core in epic byte5ai/omadia#470 P4.",
   "type": "module",

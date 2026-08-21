@@ -140,13 +140,32 @@ void describe('manifest', () => {
     }
   });
 
-  void it('requires lists every capability activate() resolves', () => {
-    const required = new Set(list('requires').map((r) => r.split('@')[0]));
+  void it('every capability activate() resolves is declared in one of the two lists', () => {
     // `ctx.services.get` THROWS for an undeclared name since C2b, so an omission
-    // here is a runtime throw, not a graceful degradation.
+    // from BOTH lists is a runtime throw, not a graceful degradation.
+    const declared = new Set(
+      [...list('requires'), ...list('optional_requires')].map((r) => r.split('@')[0]),
+    );
     for (const cap of ['graphPool', 'turnContext', 'githubAppJwt', 'usageTelemetry', 'conductorRoles']) {
-      assert.ok(required.has(cap), `manifest requires: is missing '${cap}@1'`);
+      assert.ok(declared.has(cap), `manifest declares neither requires: nor optional_requires: '${cap}@1'`);
     }
+  });
+
+  void it('only graphPool is MANDATORY — the other four are optional_requires', () => {
+    // The split is load-bearing, and in the direction that is easy to get
+    // wrong. `capabilityResolver.ts` and the install gate read `requires:` and
+    // nothing else (#795), so a name promoted back into `requires:` makes this
+    // plugin uninstallable on a core with no provider for it — for a capability
+    // `activate()` is written to survive the absence of. That was gap G2 of the
+    // 2026-08-20 acceptance run, and asserting the exact SETS (not just
+    // membership) is what stops it coming back one line at a time.
+    assert.deepEqual(list('requires'), ['graphPool@1']);
+    assert.deepEqual(list('optional_requires'), [
+      'turnContext@1',
+      'githubAppJwt@1',
+      'usageTelemetry@1',
+      'conductorRoles@1',
+    ]);
   });
 
   void it('the host-provided runtime deps stay PEERS, never bundled dependencies', () => {
