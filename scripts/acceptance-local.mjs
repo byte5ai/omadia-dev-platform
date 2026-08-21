@@ -298,7 +298,7 @@ async function grantUnified() {
  *  and a row written afterwards reaches a context that has already decided. */
 async function grantSqlLegacy() {
   if (!process.env['DATABASE_URL']) {
-    blocked('§3.8', 'SQL grant (permissions.sql)', 'no DATABASE_URL and this core exposes no HTTP grant endpoint');
+    blocked('§3.8', 'SQL grant (permissions.sql)', 'no DATABASE_URL — the pre-C16 grant path is a direct INSERT and needs one');
     return;
   }
   await db(
