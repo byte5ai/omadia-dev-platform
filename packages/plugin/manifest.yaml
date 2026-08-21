@@ -21,7 +21,7 @@ identity:
   # settled on (specs/470-dev-platform-plugin/plan.md §4.1). There is no
   # "platform" kind.
   kind: "extension"
-  version: "0.2.0"
+  version: "0.3.0"
   domain: "dev-platform"
   description: "The Omadia Dev Platform — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470)."
   authors:
@@ -41,33 +41,53 @@ lifecycle:
   entry: "dist/plugin.js"
 
 # ---------------------------------------------------------------------------
-# requires — capabilities this plugin RESOLVES at runtime.
+# requires / optional_requires — capabilities this plugin RESOLVES at runtime.
 #
 # Since epic #470 C2b, `ctx.services.get(name)` throws `ServiceNotDeclaredError`
-# for a name that appears in neither `requires` nor `provides`. So this list is
-# not documentation: every entry below is a name `activate()` actually asks for,
-# and an entry removed here becomes a throw, not a silent degradation.
+# for a name that appears in NONE of `requires`, `optional_requires` or
+# `provides`. So neither list is documentation: every entry below is a name
+# `activate()` actually asks for, and an entry removed becomes a throw, not a
+# silent degradation.
 #
-#   graphPool@1      REQUIRED. The Postgres pool the job spine, repo, gate and
-#                    artifact tables live in. Additionally gated by
-#                    `permissions.sql` + an operator grant (C7) — a `requires:`
-#                    line is the author's own say-so, and that is the wrong bar
-#                    for the pool core writes user data through.
-#   turnContext@1    Optional-by-presence. The chat dev-job tools authorize PER
-#                    CALL against the human driving the turn; without it there is
-#                    no envelope, so the tools are not registered at all rather
-#                    than registered-and-always-refusing.
-#   githubAppJwt@1   Optional. Core does not publish it yet; the plugin falls
-#                    back to a local RS256 signer. See SEAMS.md S2.
-#   usageTelemetry@1 Optional. The operator cost dashboard's ledger. Per-job
-#                    budgets do NOT depend on it — they meter this plugin's own
-#                    tables. See SEAMS.md S6.
-#   conductorRoles@1 Optional. Live holder resolution for repos whose approver is
-#                    a ROLE. Absent means role gates are unapprovable
-#                    (fail-closed). See SEAMS.md S7.
-# ---------------------------------------------------------------------------
+# The SPLIT is what changed in C9 (core issue #795). Two gates — the capability
+# resolver and the install gate — read `requires:` and nothing else, so a name
+# listed there is a HARD dependency: no installed provider, no install and no
+# activation. Four of the five below are survivable when absent, and each has a
+# written-down degradation. Listing them as `requires:` made this plugin
+# uninstallable on stock core for capabilities it is designed to live without
+# (gap G2 of the 2026-08-20 acceptance run). `optional_requires:` grants the
+# same `get()`/`getOptional()` access without the mandate.
+#
+# requires — this plugin cannot function at all without it.
+#
+#   graphPool@1      The Postgres pool the job spine, repo, gate and artifact
+#                    tables live in. Additionally gated by `permissions.sql` +
+#                    an operator grant (C7) — a `requires:` line is the author's
+#                    own say-so, and that is the wrong bar for the pool core
+#                    writes user data through.
 requires:
   - "graphPool@1"
+
+# optional_requires — declared, never mandated. `activate()` reaches for each
+# through `ctx.services.getOptional` (plugin-api 1.4.0) and takes the documented
+# degradation when it answers `undefined`. Every one of them logs what the
+# operator loses; none of them is silent.
+#
+#   turnContext@1    The chat dev-job tools authorize PER CALL against the human
+#                    driving the turn; without it there is no envelope, so the
+#                    tools are not registered at all rather than
+#                    registered-and-always-refusing. See SEAMS.md S8.
+#   githubAppJwt@1   Core does not publish it yet; the plugin falls back to a
+#                    local RS256 signer. See SEAMS.md S2.
+#   usageTelemetry@1 The operator cost dashboard's ledger. Per-job budgets do
+#                    NOT depend on it — they meter this plugin's own tables.
+#                    See SEAMS.md S6.
+#   conductorRoles@1 Live holder resolution for repos whose approver is a ROLE.
+#                    Absent means role gates are unapprovable (fail-CLOSED, the
+#                    safe direction, but still a regression the operator is
+#                    told about). See SEAMS.md S7.
+# ---------------------------------------------------------------------------
+optional_requires:
   - "turnContext@1"
   - "githubAppJwt@1"
   - "usageTelemetry@1"

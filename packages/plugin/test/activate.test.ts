@@ -23,12 +23,62 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { activate, type DevPlatformPluginContext } from '../src/plugin.js';
 import { SEED_LEDGER_ENTRIES } from '../src/ledgerHandoff.js';
+
+/**
+ * The capability names the MANIFEST declares — read from the manifest rather
+ * than restated here.
+ *
+ * A hand-written list would be a second source of truth, and the disagreement
+ * between the two is exactly the failure this has to catch: `ctx.services.get`
+ * throws for a name in neither `requires:` nor `optional_requires:` (C2b), so
+ * a capability `activate()` reaches for but the manifest forgot is an
+ * activation throw against a real core, and a hardcoded set here would hide it.
+ * Binding the double to the file the kernel actually reads makes it a failure
+ * in this suite instead.
+ */
+const DECLARED_CAPABILITIES: ReadonlySet<string> = readDeclaredCapabilities();
+
+function readDeclaredCapabilities(): ReadonlySet<string> {
+  const manifest = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'manifest.yaml'),
+    'utf8',
+  );
+  const names = new Set<string>();
+  let inList = false;
+  for (const line of manifest.split('\n')) {
+    if (/^(?:optional_)?requires:\s*$/.test(line)) {
+      inList = true;
+      continue;
+    }
+    if (!inList) continue;
+    if (line.trim() === '' || line.trim().startsWith('#')) continue;
+    const item = /^\s*-\s*["']?([^"'\n@]+)@\d+["']?\s*$/.exec(line);
+    if (!item?.[1]) {
+      inList = false;
+      continue;
+    }
+    names.add(item[1]);
+  }
+  if (names.size === 0) {
+    throw new Error('manifest.yaml declared no capabilities — the parser above drifted');
+  }
+  return names;
+}
 
 interface Recorded {
   routes: Array<{ prefix: string; auth?: string; body?: string }>;
   navs: number;
+  /** C9: the nav ENTRY, not just the count. A percent-encoded `href` is what
+   *  `HREF_SEGMENT` refuses, so the shape is the whole assertion. */
+  navEntries: Array<Record<string, unknown>>;
+  /** Which accessor each optional capability was resolved through. */
+  optionalLookups: Array<{ name: string; via: 'get' | 'getOptional' }>;
   tools: number;
   jobs: string[];
   status: Array<{ status: string; message?: string }>;
@@ -50,10 +100,14 @@ function makeCtx(over: {
   noSeedLedger?: boolean;
   /** Files the seed declined because their witness was false. */
   skippedNoWitness?: readonly string[];
+  /** Simulate a core older than plugin-api 1.4.0: no `services.getOptional`. */
+  noGetOptional?: boolean;
 }): { ctx: DevPlatformPluginContext; rec: Recorded } {
   const rec: Recorded = {
     routes: [],
     navs: 0,
+    navEntries: [],
+    optionalLookups: [],
     tools: 0,
     toolNames: [] as string[],
     toolSpecs: [] as { name: string; hasHandler: boolean; hasPromptDoc: boolean }[],
@@ -80,8 +134,38 @@ function makeCtx(over: {
     },
     config: { get: <T,>(k: string) => (over.answers ?? {})[k] as T | undefined },
     services: {
-      get: <T,>(n: string) => caps[n] as T | undefined,
+      // Faithful to the kernel since C2b: a name declared in NEITHER
+      // `requires:` nor `optional_requires:` THROWS rather than answering
+      // undefined. The previous stub answered undefined for everything, so a
+      // manifest that forgot a capability stayed green here and threw against a
+      // real core — the same class of fidelity gap that let the P1 double
+      // registration through.
+      get: <T,>(n: string) => {
+        rec.optionalLookups.push({ name: n, via: 'get' });
+        if (!DECLARED_CAPABILITIES.has(n)) {
+          throw new Error(
+            `ServiceNotDeclaredError: @omadia/dev-platform did not declare ${n}`,
+          );
+        }
+        return caps[n] as T | undefined;
+      },
       has: (n: string) => n in caps,
+      // #795 / plugin-api 1.4.0. `over.noGetOptional` simulates a core that
+      // predates it, which must still resolve every optional capability through
+      // the `get()` fallback rather than degrading.
+      ...(over.noGetOptional
+        ? {}
+        : {
+            getOptional: <T,>(n: string) => {
+              rec.optionalLookups.push({ name: n, via: 'getOptional' });
+              if (!DECLARED_CAPABILITIES.has(n)) {
+                throw new Error(
+                  `ServiceNotDeclaredError: @omadia/dev-platform did not declare ${n}`,
+                );
+              }
+              return caps[n] as T | undefined;
+            },
+          }),
     },
     ...(over.noSql
       ? {}
@@ -161,8 +245,9 @@ function makeCtx(over: {
       },
     },
     uiRoutes: {
-      registerNav: () => {
+      registerNav: (entry: unknown) => {
         rec.navs += 1;
+        rec.navEntries.push(entry as Record<string, unknown>);
         return dispose;
       },
     },
@@ -413,5 +498,94 @@ describe('#470 C11 — activate() adopts core\'s ledger before applying', () => 
       'and say why activation continues anyway',
     );
     assert.equal(rec.migrationsRun, 1, 'the apply loop is the repair');
+  });
+});
+
+/**
+ * C9 (core issue #795 / #796): the two contract shapes that a unit test can pin
+ * and a fake context alone cannot.
+ *
+ * Both were found by running against a real core, not by reading code, and both
+ * fail the same way — a throw out of `registerNav` or `services.get` aborts
+ * `activateInner`, so the plugin does not activate AT ALL. A recording double
+ * accepts anything, which is exactly why the shape has to be asserted here
+ * rather than merely exercised.
+ */
+void describe('C9 host contracts', () => {
+  void it('registers nav with pluginUi, never a hand-built href', async () => {
+    // `HREF_SEGMENT` is the RFC 3986 unreserved set and #798 kept it strict, so
+    // the percent-encoded href this plugin's SCOPED id needs is precisely the
+    // one core refuses — while the raw spelling 404s (two path segments). The
+    // kernel renders `pluginUiHref(id)` itself when the entry says
+    // `pluginUi: true`; that is the only registrable shape.
+    const { ctx, rec } = makeCtx({});
+    const handle = await activate(ctx);
+    await handle.close();
+
+    assert.equal(rec.navEntries.length, 1);
+    const entry = rec.navEntries[0] as Record<string, unknown>;
+    assert.equal(entry['pluginUi'], true, 'the kernel must render the href');
+    assert.equal(
+      entry['href'],
+      undefined,
+      "an href here is unregisterable, not merely redundant — `supply either 'href' or 'pluginUi: true', not both`",
+    );
+    assert.equal(entry['navId'], 'devPlatform');
+  });
+
+  void it('resolves optional capabilities through getOptional when core has it', async () => {
+    const { ctx, rec } = makeCtx({});
+    const handle = await activate(ctx);
+    await handle.close();
+
+    const optional = ['githubAppJwt', 'usageTelemetry', 'conductorRoles', 'turnContext'];
+    for (const name of optional) {
+      const lookups = rec.optionalLookups.filter((l) => l.name === name);
+      assert.ok(lookups.length > 0, `${name} was never resolved`);
+      assert.ok(
+        lookups.every((l) => l.via === 'getOptional'),
+        `${name} must go through getOptional — it is an optional_requires entry`,
+      );
+    }
+    // graphPool is the one MANDATORY capability and stays on `get`: a missing
+    // pool is a refusal with a named fix, not a degradation.
+    assert.ok(rec.optionalLookups.some((l) => l.name === 'graphPool' && l.via === 'get'));
+  });
+
+  void it('falls back to get() on a core older than plugin-api 1.4.0', async () => {
+    // The optionality of `getOptional` IS the version guard. A core without it
+    // must still activate, resolving the same names through `get()` — which is
+    // granted by `optional_requires:` just as it is by `requires:`.
+    const { ctx, rec } = makeCtx({ noGetOptional: true });
+    const handle = await activate(ctx);
+    await handle.close();
+
+    assert.ok(
+      rec.optionalLookups.every((l) => l.via === 'get'),
+      'no getOptional call may be attempted when the accessor is absent',
+    );
+    assert.ok(rec.optionalLookups.some((l) => l.name === 'conductorRoles'));
+    assert.equal(rec.navs, 1, 'activation completed');
+  });
+
+  void it('an undeclared capability is reported as a manifest bug, not an old core', async () => {
+    // `ctx.services.get`/`getOptional` throw `ServiceNotDeclaredError` for a
+    // name in neither list. `optionalCapability` catches it so a declaration
+    // mistake does not read as "this core is too old" — but it must still reach
+    // the log, or the plugin degrades in silence.
+    const { ctx, rec } = makeCtx({});
+    const handle = await activate(ctx);
+    await handle.close();
+
+    for (const name of ['githubAppJwt', 'usageTelemetry', 'conductorRoles', 'turnContext']) {
+      assert.ok(
+        DECLARED_CAPABILITIES.has(name),
+        `manifest.yaml declares neither requires: nor optional_requires: '${name}'`,
+      );
+    }
+    assert.ok(
+      !rec.logs.some((l) => l.includes('not resolvable')),
+      'a declared capability must never be reported as unresolvable',
+    );
   });
 });

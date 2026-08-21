@@ -1,6 +1,6 @@
 {
   "name": "@omadia/dev-runner-shim",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "The dev-platform runner shim: clones a repo read-only, drives the headless Claude CLI, translates its stream-json to runner events, and uploads a diff. Node builtins only — never imports the host. Ships as the dev-runner image entrypoint, and as the child process the unsafe local backend spawns. Moved out of omadia core in epic byte5ai/omadia#470 P4.",
   "type": "module",
