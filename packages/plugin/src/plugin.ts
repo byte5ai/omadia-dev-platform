@@ -334,6 +334,23 @@ async function activateInner(
     // Guarded: `seedLedger` is optional on the contract, so a core older than
     // plugin-api 1.3.0 falls through to the (idempotent) apply loop instead of
     // failing to activate.
+    //
+    // C15 (core issue byte5ai/omadia#814) — THIS CALL IS NOW THE FALLBACK, not
+    // the primary path, and it is deliberately kept.
+    //
+    // On a core that runs `permissions.sql.migrations` itself before
+    // `activate()` — which is every core since C7 — this call is structurally
+    // too late: the ledger rows are already written by the time we get here, so
+    // it can only report `alreadySeeded` and `skippedNoWitness` never fires.
+    // The manifest's `permissions.sql.handoff` fixes that by having the kernel
+    // perform the handoff first, from the same plan file.
+    //
+    // Against such a kernel this call is a no-op that reports the work already
+    // done, which is correct and costs one read-only transaction. Against a
+    // kernel that does NOT honour `handoff` it is the only thing that performs
+    // the handoff at all. Removing it would silently drop the adoption on every
+    // older core; keeping it costs a log line on newer ones. That trade is not
+    // close.
     if (ctx.sql.seedLedger) {
       const handoff = await ctx.sql.seedLedger({ entries: SEED_LEDGER_ENTRIES });
       log(
