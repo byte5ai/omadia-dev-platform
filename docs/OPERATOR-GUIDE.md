@@ -16,6 +16,7 @@ the runbook.
 - [10. Uninstall and purge](#10-uninstall-and-purge)
 - [11. Troubleshooting](#11-troubleshooting)
 - [12. Known open issues](#12-known-open-issues)
+- [Appendix A — Older cores](#appendix-a--older-cores)
 
 ---
 
@@ -69,42 +70,80 @@ directory.
 ## 4. The two operator grants
 
 The manifest *asks*; a human has to *agree*. Neither grant is implied by
-installing.
+installing — but both are now answered in the admin UI, in the install wizard
+or on the plugin page, and neither needs a middleware restart.
 
-### 4.1 The SQL permission (`permissions.sql`) — no UI yet
+> **Does your core have this?** The consent surface arrived with core PR
+> [byte5ai/omadia#824](https://github.com/byte5ai/omadia/pull/824) (epic #470
+> C16). No `@omadia/plugin-api` type changed with it, so the version number
+> cannot answer the question — ask the server:
+>
+> ```bash
+> curl -X GET "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants"
+> ```
+>
+> `200` with a `declared` block means you have it. `404` means you do not — use
+> [Appendix A](#appendix-a--older-cores), which is the procedure this section
+> documented before #824.
 
-Core provisions `ctx.sql` only when a row exists in `plugin_sql_grants` whose
-`ledger` matches the manifest exactly.
+### 4.1 During install — the "Permissions" step
 
-> **Core ships no surface for this.** Not a UI, not an API route —
-> `middleware/src/platform/pluginSqlGrants.ts` says so twice in its own source:
-> *"`plugin_sql_grants` still has no shipped grant surface — nothing in `src/`
-> calls `grant()`."* There is a hardcoded ramp for four **bundled** core
-> plugins; `@omadia/dev-platform` is installed, not bundled, so it is not on it
-> and could not be.
+After the setup form is filled in and accepted, the wizard shows a
+**Permissions** step. It lists what this manifest asks for and nothing else:
 
-Until core ships one, insert the row by hand:
+- **Own database tables** — the SQL permission, naming the migration ledger
+  `plg_omadia_dev_platform_migrations`. The plugin creates and migrates its own
+  nine tables and cannot reach omadia's or another plugin's.
+- **One row per public path** — the three prefixes in §4.3, each stating that it
+  answers without an omadia session and that declining leaves it behind the
+  login.
+- **Optional prerequisites** — `turnContext@1`, `githubAppJwt@1`,
+  `usageTelemetry@1`, `conductorRoles@1`, listed *without* checkboxes. They are
+  not permissions and there is nothing here for you to grant (§8).
 
-```sql
-INSERT INTO plugin_sql_grants (plugin_id, ledger, granted_by)
-VALUES ('@omadia/dev-platform',
-        'plg_omadia_dev_platform_migrations',
-        'you@example.com');
-```
+The boxes start ticked, because ticked is what the manifest asked for.
+**Grant & activate** records the consent and activates the plugin in the same
+request, then shows the state the server read back — not an assumption that it
+worked.
 
-Then restart the middleware. The ledger name must match
-`permissions.sql.ledger` character for character — core compares the two and
-treats any difference as no grant at all.
+**Skip** is a real option and does not lose the install. It grants nothing, and
+because this plugin reaches for the database in `activate()`, skipping leaves it
+`errored` and the wizard says so rather than guessing. Grant it later from the
+panel below: no reinstall, no restart.
+
+### 4.2 Afterwards — the Grants panel
+
+**Admin → Plugins → Dev Platform**, section **Permissions** (anchor `#grants`).
+It shows what is granted against what the manifest declares, one toggle per
+grant, and **Apply** saves and re-activates in place.
+
+This is also where a grant is withdrawn. Turning the SQL permission off and
+applying leaves the plugin `errored` — the honest answer, because it cannot run
+without its tables — and the panel names the reason.
+
+The panel starts from what is **granted**, not from what is declared, so a grant
+you declined reads as declined instead of arriving pre-ticked.
+
+A grant on record for a ledger the manifest no longer declares gets its own
+line. That is a different problem from "not granted" and needs a different fix:
+tick the box to grant the ledger the plugin now asks for.
+
+### 4.3 What you are agreeing to
+
+**The SQL permission (`permissions.sql`).** Core provisions `ctx.sql` only
+against a grant whose ledger matches the manifest character for character; any
+difference is not a partial grant, it is no grant. The ledger is taken from the
+manifest and the granting identity from your session — neither is anything a
+request body can dictate.
 
 The name is not arbitrary: core derives `plg_<sanitized-plugin-id>_` from the id
 *it* knows and rejects anything outside it. `plg_` is kernel-reserved so no core
 table can live there, and the folded id means one plugin cannot nominate
 another's ledger and forge its migration history.
 
-### 4.2 The public-path grants (`permissions.public_paths`)
-
-Three prefixes are served without a kernel session, because the caller has none
-to present. Each is still authenticated:
+**The public-path grants (`permissions.public_paths`).** Three prefixes are
+served without a kernel session, because the caller has none to present. Each is
+still authenticated:
 
 | Prefix | Authenticated by |
 |---|---|
@@ -112,24 +151,56 @@ to present. Each is still authenticated:
 | `/api/webhooks/github` | HMAC-SHA256 over the raw request body. |
 | `/api/v1/dev-platform` | The GitHub App manifest-conversion callback, bound to a kernel-signed, plugin-audience state token. |
 
-This grant **does** have a shipped surface, behind operator auth:
+Without these grants the runner cannot phone home, webhooks 401, and GitHub App
+onboarding cannot complete. An ungranted public path is deliberately **not** an
+activation failure: the route falls through to `requireAuth` and answers 401,
+which is both the fail-closed direction and what every plugin installed before
+this surface existed already depends on.
+
+**Consent can never exceed the declaration.** Core refuses
+`runtime.sql_not_declared` and `runtime.public_path_not_declared` for anything
+this manifest does not ask for, so the consent surface cannot itself be used to
+hand a plugin your database or make an arbitrary URL public.
+
+### 4.4 For automation — the admin API
+
+The UI calls one route, and so can you. Both grants travel together, behind
+operator auth:
 
 ```bash
-# What the plugin asks for, and what you have already granted
-curl -X GET "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths"
+# What the manifest asks for, what is granted, the resulting state, and what is
+# still missing
+curl -X GET "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants"
 
-# Grant. This is the COMPLETE set — omitting a prefix revokes it.
+# Grant both. Takes effect in-process — no middleware restart.
+curl -X PUT "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants" \
+  -H 'Content-Type: application/json' \
+  -d '{"sql":true,
+       "public_paths":["/api/v1/dev-runner","/api/webhooks/github","/api/v1/dev-platform"]}'
+```
+
+An **absent** key leaves that grant alone, which is how the panel's per-grant
+toggle sends one at a time. A **present** `public_paths` is the complete set you
+consent to — omitting a prefix revokes it. The response is the state read back
+from the registry after the re-activation, including `last_activation_error`
+when the plugin did not come back up.
+
+Refusals worth knowing: `409 runtime.ledger_already_owned` (another plugin holds
+that table), `503` (no database is configured, so nothing was recorded), and the
+two `not_declared` codes above.
+
+The older route keeps its exact request and response shape as an alias over the
+same core, so existing automation does not need rewriting:
+
+```bash
 curl -X PUT "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths" \
   -H 'Content-Type: application/json' \
   -d '{"paths":["/api/v1/dev-runner","/api/webhooks/github","/api/v1/dev-platform"]}'
 ```
 
-Consent cannot exceed the declaration — core rejects with
-`runtime.public_path_not_declared` any prefix this manifest does not request, so
-the consent endpoint can never itself be used to make an arbitrary URL public.
-
-Without these grants: the runner cannot phone home, webhooks 401, and GitHub App
-onboarding cannot complete.
+`node scripts/acceptance-local.mjs` drives the unified route when the core under
+test ships it and falls back to the pre-#824 pair when it does not, so the
+acceptance run exercises whichever path a real operator would be using.
 
 ## 5. Credentials — you enter these yourself
 
@@ -416,9 +487,13 @@ and granted public paths stop being honoured (`/api/v1/dev-runner/...` goes
 
 What survives: all nine `dev_*` tables and every row, plus the migration ledger.
 
-> Grant rows are **not** revoked on uninstall — `plugin_sql_grants` and
-> `plugin_public_path_grants` keep their rows. Orphaned, not a live hole: the
-> runtime stops honouring them. The lifecycle decision is still open upstream.
+> **Grants do not survive.** Since core #824 (§4), uninstall purges
+> `plugin_sql_grants` and `plugin_public_path_grants` alongside the vault, so a
+> reinstall under the same id starts un-granted and **asks you again** — it does
+> not inherit the previous package's database access or its unauthenticated
+> surface. On a core without #824 the rows stay behind instead: orphaned rather
+> than a live hole, because the runtime stops honouring them, but they are worth
+> deleting by hand if the plugin is gone for good.
 
 To actually destroy the data, call the purge route — explicit, destructive and
 type-to-confirm:
@@ -458,7 +533,19 @@ this plugin only `graphPool@1` can trigger it; the other four moved to
 
 **Activation fails naming the ledger.** The ledger must sit inside
 `plg_omadia_dev_platform_` and match `permissions.sql.ledger` exactly. A grant
-row with a different ledger name is not a partial grant — it is no grant.
+row with a different ledger name is not a partial grant — it is no grant. Since
+core #824 the error names the admin route that fixes it, and the Grants panel
+(§4.2) shows the mismatch as its own line rather than as a plain "not granted".
+
+**The plugin reads `errored` right after install.** Most likely the Permissions
+step was skipped: this plugin reaches for the database in `activate()`, so
+without the SQL grant it rolls itself back. Grant it in the Grants panel (§4.2)
+— the plugin is re-activated in place, and no reinstall or restart is needed.
+
+**A grant was applied and nothing changed.** Read the response, not the absence
+of an error: the route returns the state it read back from the registry after
+re-activating, with `last_activation_error` populated when the plugin failed to
+come back up. A 503 means no database is configured and nothing was recorded.
 
 **Every route 404s but the plugin reports `status: "active"`.** Known core bug
 (G4, §12). The install path writes `status: 'active'` before running the
@@ -487,7 +574,7 @@ Use a GitHub App or a PAT.
 
 | # | Issue | Status |
 |---|---|---|
-| **G4** | A failed activation still reports `status: "active"`. The install path writes the status before the `onInstalled` hook and never revises it. Makes every other verdict less trustworthy. | **Open** in core |
+| **G4** | A failed activation still reports `status: "active"`. The install path writes the status before the `onInstalled` hook and never revises it. Makes every other verdict less trustworthy. | **Partly fixed.** Core #824 made the *re-activation* path truthful — a grant applied from §4's panel records `errored` with the reason instead of swallowing the hook's failure. The **install** path still writes `active` first, so the sharp edge remains on a fresh install. |
 | **G6** | Core's `publicPaths.ts` carried two static dev-platform exemptions that collided with this plugin's declarations. This single residue caused all 33 failures of the 2026-08-21 run against `main`. | **Fixed on core `main`** — C12, core PR #807 (`e1e31f62`, 2026-08-21). Use a core at or after that commit. |
 | **G7** | Core's pre-activate migration run happened **before** `activate()`, pre-empting the C11 handoff: `seedLedger` found all nine already applied and `skippedNoWitness` — the one alarm the feature exists to raise — never fired. The 2026-08-21 run measured `0 seeded, 9 already seeded` on the exact upgrade the feature was built for, and nothing went red. | **Fixed in 0.3.1** (C15, core issue byte5ai/omadia#814). `permissions.sql.handoff` declares the plan so the **kernel** runs it ahead of its own migration runner. Needs core with `@omadia/plugin-api` **1.6.0**; on anything older the key is ignored and the `activate()` fallback still runs — so on a core below 1.6.0 the gap remains, and the §7 dry run is the way to see it. |
 
@@ -500,6 +587,54 @@ Acceptance runs:
 
 Both reproduce with `node scripts/acceptance-local.mjs` (exit code equals the
 FAIL count), driven by `BASE_URL` and `DATABASE_URL`.
+
+## Appendix A — Older cores
+
+**Only for a core without the consent surface** — one where
+`GET /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants` answers 404
+(§4). This was the whole of §4 before core PR
+[byte5ai/omadia#824](https://github.com/byte5ai/omadia/pull/824), and it is kept
+because a plugin release outlives the core release it was written against.
+
+**The SQL permission had no surface at all.** Not a UI, not an API route —
+`middleware/src/platform/pluginSqlGrants.ts` says so twice in its own source:
+*"`plugin_sql_grants` still has no shipped grant surface — nothing in `src/`
+calls `grant()`."* The hardcoded ramp there covers four **bundled** core
+plugins; `@omadia/dev-platform` is installed, not bundled, so it never was on it
+and could not be. The row goes in by hand, from a client with database access:
+
+```sql
+INSERT INTO plugin_sql_grants (plugin_id, ledger, granted_by)
+VALUES ('@omadia/dev-platform',
+        'plg_omadia_dev_platform_migrations',
+        'you@example.com');
+```
+
+**Then restart the middleware.** `ctx.services.get` is synchronous, so the grant
+is read once, before the plugin's context is built — a row written afterwards
+reaches a context that has already decided. Insert it *before* installing, or
+restart after. This is the step #824 removed, and the reason it was worth
+removing: an operator who has to schedule a restart to find out whether a
+permission was needed learns to grant everything up front.
+
+The ledger name must match `permissions.sql.ledger` character for character
+(§4.3 explains why core constrains the name at all).
+
+**The public-path grants did have a route**, and it still works unchanged on
+every core, new and old:
+
+```bash
+curl -X GET "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths"
+
+curl -X PUT "$BASE/api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths" \
+  -H 'Content-Type: application/json' \
+  -d '{"paths":["/api/v1/dev-runner","/api/webhooks/github","/api/v1/dev-platform"]}'
+```
+
+`PUT` takes the COMPLETE set — omitting a prefix revokes it.
+
+**Uninstall leaves the grant rows behind** on these cores (§10). Delete them by
+hand if the plugin is not coming back.
 
 ## See also
 

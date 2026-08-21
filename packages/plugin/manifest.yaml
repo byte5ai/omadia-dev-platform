@@ -64,7 +64,7 @@ identity:
   # settled on (specs/470-dev-platform-plugin/plan.md §4.1). There is no
   # "platform" kind.
   kind: "extension"
-  version: "0.3.2"
+  version: "0.3.3"
   domain: "dev-platform"
   description: "Runs autonomous coding jobs against your GitHub repositories. An agent clones a repo into an isolated runner, drives an LLM through an analyze/plan/implement/review pipeline, and opens a pull request — bounded at every step by human approval gates, a diff policy, a per-job cost budget and an egress allowlist. Ships its own operator UI, HTTP routes, chat tools, background workers and nine database tables it migrates itself. Runners execute on Fly Machines or on local Docker; neither ever sees a long-lived credential. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470)."
   authors:
@@ -105,6 +105,13 @@ compat:
   # ignores the unknown key and the `activate()` `seedLedger` call remains the
   # thing that performs the handoff. The floor tracks what this plugin cannot
   # run without, not what it would prefer.
+  #
+  # C16 (byte5ai/omadia#824 — the unified grant-consent route and the install
+  # wizard's Permissions step) does not move it either, and could not: it
+  # changed no plugin-api type, so there is no version to name. It is a change
+  # to how an operator ANSWERS the two permissions below, not to what this
+  # manifest declares. On a core without it the permissions are identical and
+  # the answer is a hand-written grant row — OPERATOR-GUIDE Appendix A.
   #
   # NOTE, so nobody mistakes this for a gate: core does NOT enforce it. Nothing
   # in `middleware/src` semver-compares `compat_core` — `manifestLoader.ts:503`
@@ -273,31 +280,30 @@ setup:
       refuses to activate rather than pretending to work — set `DATABASE_URL`
       and install the Neon knowledge-graph plugin first.
 
-      ### Two operator grants — do these, or the plugin does not work
+      ### Two operator grants — the next step after this form
 
       This plugin declares two permissions that a manifest alone cannot give it.
-      Core requires a human to agree, separately, after install.
+      A human has to agree, separately, and neither is implied by installing.
+
+      **You are asked on the next step.** Once this form is accepted the wizard
+      shows **Permissions**, listing exactly what is below and nothing else.
+      *Grant & activate* records your consent and activates the plugin in the
+      same request. *Skip* grants nothing and does not lose the install — the
+      same choices live on the plugin page afterwards, under **Permissions**,
+      with a toggle per grant. Either way the plugin is re-activated in place:
+      **no middleware restart.**
 
       **1. The SQL permission (`permissions.sql`).** The plugin owns nine tables
       and migrates them itself into its own ledger,
-      `plg_omadia_dev_platform_migrations`. Core provisions `ctx.sql` only when
-      a row exists in `plugin_sql_grants`.
+      `plg_omadia_dev_platform_migrations`. It cannot read or write omadia's
+      tables or another plugin's. The ledger name comes from this manifest and
+      the granting identity from your session — neither can be supplied by a
+      request.
 
-      > **There is no button for this yet.** Core ships no UI and no API route
-      > that writes that row — `middleware/src/platform/pluginSqlGrants.ts`
-      > records it twice in its own source ("no shipped grant surface — nothing
-      > in `src/` calls `grant()`"). Until core ships one, an operator with
-      > database access inserts it by hand:
-      >
-      > ```sql
-      > INSERT INTO plugin_sql_grants (plugin_id, ledger, granted_by)
-      > VALUES ('@omadia/dev-platform',
-      >         'plg_omadia_dev_platform_migrations',
-      >         'you@example.com');
-      > ```
-      >
-      > The ledger name must match the manifest exactly — core compares them and
-      > treats a mismatch as no grant at all. Restart the middleware afterwards.
+      > **This plugin reaches for the database in `activate()`,** so skipping
+      > this grant leaves it `errored` rather than half-working, and the wizard
+      > says so instead of guessing. Granting it later from the plugin page
+      > brings it up; no reinstall.
 
       **2. The public-path grants (`permissions.public_paths`).** Three URL
       prefixes are served without a kernel session, because the caller has no
@@ -308,20 +314,34 @@ setup:
       - `/api/v1/dev-platform` — the GitHub App manifest-conversion callback,
         bound to a kernel-signed, plugin-audience state token.
 
-      This one **does** have a shipped surface, behind operator auth:
+      Declining one is not an activation failure: the prefix simply stays behind
+      the login and answers 401. Without them the runner cannot phone home,
+      webhooks 401, and GitHub App onboarding cannot complete.
+
+      Consent can never exceed the declaration — core rejects anything this
+      manifest does not ask for, so the consent surface cannot itself be used to
+      hand a plugin your database or make an arbitrary URL public.
+
+      For automation, one route carries both, behind operator auth:
 
       ```
-      GET  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
-      PUT  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
-           { "paths": ["/api/v1/dev-runner",
-                       "/api/webhooks/github",
-                       "/api/v1/dev-platform"] }
+      GET  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants
+      PUT  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants
+           { "sql": true,
+             "public_paths": ["/api/v1/dev-runner",
+                              "/api/webhooks/github",
+                              "/api/v1/dev-platform"] }
       ```
 
-      `PUT` takes the COMPLETE set you consent to — omitting a prefix revokes
-      it. Consent cannot exceed the declaration: core rejects any prefix this
-      manifest does not ask for. Without these grants the runner cannot phone
-      home, webhooks 401, and GitHub App onboarding cannot complete.
+      An absent key leaves that grant alone; a present `public_paths` is the
+      COMPLETE set, so omitting a prefix revokes it. The older
+      `…/public-paths` route still works unchanged.
+
+      > **On a core older than byte5ai/omadia#824** none of the above exists:
+      > `GET …/grants` answers 404, the SQL grant is a hand-written row in
+      > `plugin_sql_grants` followed by a middleware restart, and only the
+      > `…/public-paths` route is available. The plugin's OPERATOR-GUIDE
+      > Appendix A has that procedure in full.
 
       ### What this plugin does without, and what you lose
 
@@ -433,33 +453,32 @@ setup:
       verweigert das Plugin die Aktivierung, statt Betrieb vorzutäuschen — setze
       zuerst `DATABASE_URL` und installiere das Neon-Knowledge-Graph-Plugin.
 
-      ### Zwei Freigaben durch dich — ohne sie läuft das Plugin nicht
+      ### Zwei Freigaben durch dich — der nächste Schritt nach diesem Formular
 
       Das Manifest *fragt*; zustimmen muss ein Mensch. Keine der beiden Freigaben
       ergibt sich aus der Installation.
 
+      **Gefragt wirst du im nächsten Schritt.** Sobald dieses Formular
+      angenommen ist, zeigt der Assistent den Schritt **Berechtigungen** — mit
+      genau dem, was unten steht, und nichts sonst. *Freigeben & aktivieren*
+      speichert deine Zustimmung und aktiviert das Plugin im selben Request.
+      *Überspringen* gibt nichts frei und verwirft die Installation nicht — die
+      gleichen Schalter findest du danach auf der Plugin-Seite unter
+      **Berechtigungen**, einen pro Freigabe, mit *Übernehmen* zum Speichern. In
+      beiden Fällen wird das Plugin direkt neu aktiviert: **kein Neustart der
+      Middleware.**
+
       **1. Die SQL-Berechtigung (`permissions.sql`).** Das Plugin besitzt neun
       Tabellen und migriert sie selbst in sein eigenes Ledger
-      `plg_omadia_dev_platform_migrations`. Core stellt `ctx.sql` nur bereit,
-      wenn in `plugin_sql_grants` eine passende Zeile existiert.
+      `plg_omadia_dev_platform_migrations`. Auf Tabellen von omadia oder anderen
+      Plugins hat es keinen Zugriff. Der Ledger-Name stammt aus diesem Manifest,
+      die zustimmende Identität aus deiner Session — beides kann kein Request
+      vorgeben.
 
-      > **Dafür gibt es noch keinen Button.** Core liefert weder UI noch
-      > API-Route, die diese Zeile schreibt —
-      > `middleware/src/platform/pluginSqlGrants.ts` hält das zweimal im eigenen
-      > Quelltext fest („no shipped grant surface — nothing in `src/` calls
-      > `grant()`"). Bis Core eine Oberfläche liefert, trägt sie jemand mit
-      > Datenbankzugriff von Hand ein:
-      >
-      > ```sql
-      > INSERT INTO plugin_sql_grants (plugin_id, ledger, granted_by)
-      > VALUES ('@omadia/dev-platform',
-      >         'plg_omadia_dev_platform_migrations',
-      >         'du@example.com');
-      > ```
-      >
-      > Der Ledger-Name muss exakt dem Manifest entsprechen — Core vergleicht
-      > beide und wertet jede Abweichung als gar keine Freigabe. Danach die
-      > Middleware neu starten.
+      > **Das Plugin greift in `activate()` auf die Datenbank zu.** Überspringst
+      > du diese Freigabe, bleibt es deshalb `errored`, statt halb zu laufen —
+      > und der Assistent sagt das, statt es zu raten. Später auf der
+      > Plugin-Seite erteilt, kommt es hoch; ohne Neuinstallation.
 
       **2. Die Public-Path-Freigaben (`permissions.public_paths`).** Drei
       Präfixe werden ohne Kernel-Session ausgeliefert, weil der Aufrufer keine
@@ -470,21 +489,37 @@ setup:
       - `/api/v1/dev-platform` — der GitHub-App-Callback, gebunden an ein
         kernel-signiertes State-Token mit Plugin-Audience.
 
-      Hierfür gibt es eine fertige Schnittstelle hinter Operator-Auth:
+      Eine abgelehnte Freigabe ist kein Aktivierungsfehler: Das Präfix bleibt
+      dann einfach hinter dem Login und antwortet mit 401. Ohne die Freigaben
+      erreicht der Runner die Middleware nicht, Webhooks laufen auf 401, und das
+      GitHub-App-Onboarding kann nicht abschließen.
+
+      Die Zustimmung kann die Deklaration nie überschreiten — Core lehnt alles
+      ab, was dieses Manifest nicht anfragt. Die Freigabe-Schnittstelle taugt
+      also selbst nicht dazu, einem Plugin deine Datenbank zu geben oder eine
+      beliebige URL öffentlich zu machen.
+
+      Für Automatisierung trägt eine Route beides, hinter Operator-Auth:
 
       ```
-      GET  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
-      PUT  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths
-           { "paths": ["/api/v1/dev-runner",
-                       "/api/webhooks/github",
-                       "/api/v1/dev-platform"] }
+      GET  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants
+      PUT  /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants
+           { "sql": true,
+             "public_paths": ["/api/v1/dev-runner",
+                              "/api/webhooks/github",
+                              "/api/v1/dev-platform"] }
       ```
 
-      `PUT` erwartet die VOLLSTÄNDIGE Menge — ein weggelassenes Präfix wird
-      entzogen. Die Zustimmung kann die Deklaration nicht überschreiten: Core
-      lehnt jedes Präfix ab, das dieses Manifest nicht anfragt. Ohne diese
-      Freigaben erreicht der Runner die Middleware nicht, Webhooks laufen auf
-      401, und das GitHub-App-Onboarding kann nicht abschließen.
+      Ein fehlender Schlüssel lässt die jeweilige Freigabe unangetastet; ein
+      vorhandenes `public_paths` ist die VOLLSTÄNDIGE Menge — ein weggelassenes
+      Präfix wird entzogen. Die alte Route `…/public-paths` funktioniert
+      unverändert weiter.
+
+      > **Auf einem Core älter als byte5ai/omadia#824** existiert nichts davon:
+      > `GET …/grants` antwortet mit 404, die SQL-Freigabe ist eine von Hand
+      > eingetragene Zeile in `plugin_sql_grants` plus Neustart der Middleware,
+      > und verfügbar ist nur die Route `…/public-paths`. Anhang A im
+      > OPERATOR-GUIDE des Plugins beschreibt das vollständig.
 
       ### Worauf dieses Plugin verzichten kann — und was dich das kostet
 

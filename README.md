@@ -214,8 +214,12 @@ It is idempotent and its exit code equals the FAIL count. Recorded runs:
 - **Via direct upload:** upload the ZIP in the Omadia admin UI.
 
 **Two grants are required after install** and neither is implied by installing
-— the SQL permission (which core has no UI for yet) and the public-path
-consents. Both are in
+— the SQL permission and the public-path consents. Both are answered in the
+admin UI: a **Permissions** step in the install wizard, and a **Permissions**
+panel on the plugin page for changing your mind later. They take effect in
+process, so no restart is involved. Details, the automation route, and the
+hand-INSERT procedure for cores older than
+[byte5ai/omadia#824](https://github.com/byte5ai/omadia/pull/824) are in
 [Operator Guide §4](./docs/OPERATOR-GUIDE.md#4-the-two-operator-grants).
 
 **Never re-upload a changed ZIP under the same version.** The already-`import()`ed

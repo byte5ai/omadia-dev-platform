@@ -35,15 +35,31 @@ provider, install is refused with `install.missing_capability` (HTTP 409).
 The manifest asks; a human has to agree. Neither is implied by installing, and
 without them the plugin does not work.
 
-1. **`permissions.sql`** — core provisions `ctx.sql` only when a row exists in
-   `plugin_sql_grants` for ledger `plg_omadia_dev_platform_migrations`.
-   **Core ships no UI or API for this yet**, so the row is inserted by hand.
+1. **`permissions.sql`** — the plugin owns nine tables and migrates them itself
+   into the ledger `plg_omadia_dev_platform_migrations`. It cannot reach
+   omadia's tables or another plugin's.
 2. **`permissions.public_paths`** — three prefixes served without a kernel
    session (each still authenticated: a per-job bearer token, a webhook HMAC,
-   and a signed state token). Granted through
-   `PUT /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/public-paths`.
+   and a signed state token).
 
-Exact steps for both:
+**Both are answered in the admin UI.** The install wizard shows a
+**Permissions** step after configuration; **Grant & activate** records the
+consent and activates in the same request, and **Skip** grants nothing without
+losing the install. Afterwards, the plugin page has a **Permissions** panel
+(`#grants`) with a toggle per grant. Applying either re-activates the plugin in
+process — **no middleware restart**.
+
+Skipping the SQL grant leaves the plugin `errored`, because it reaches for the
+database in `activate()`. That is recoverable from the panel at any time; it
+does not need a reinstall.
+
+For automation, one route carries both:
+`PUT /api/v1/admin/runtime/installed/@omadia%2Fdev-platform/grants` with
+`{"sql":true,"public_paths":[…]}`. The older `…/public-paths` route still works
+unchanged.
+
+Exact steps, refusal codes, and the hand-INSERT procedure for cores older than
+[byte5ai/omadia#824](https://github.com/byte5ai/omadia/pull/824):
 [Operator Guide §4](../../docs/OPERATOR-GUIDE.md#4-the-two-operator-grants).
 
 ## Optional capabilities
@@ -96,6 +112,11 @@ loops are disposed; the nine `dev_*` tables and all rows survive, so a reinstall
 is lossless. To actually destroy the data there is an explicit, type-to-confirm
 purge route — see
 [Operator Guide §10](../../docs/OPERATOR-GUIDE.md#10-uninstall-and-purge).
+
+**The grants do not survive.** Uninstall purges both grant tables, so a
+reinstall starts un-granted and asks again rather than inheriting the previous
+package's database access. (On cores older than #824 the rows stay behind
+instead — orphaned, not honoured.)
 
 ## License
 
