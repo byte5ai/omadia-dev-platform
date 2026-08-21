@@ -9,6 +9,81 @@ project versions the ARTIFACT, not the repository: a release is a ZIP an
 operator can install, so anything that does not change the ZIP does not get a
 version.
 
+## 0.3.3 — 2026-08-21
+
+Documentation only — no plugin code changed. Core PR
+[byte5ai/omadia#824](https://github.com/byte5ai/omadia/pull/824) (epic #470 C16)
+gave the two operator grants a UI and one API route, so every place this plugin
+told an operator to write an `INSERT` by hand and restart the middleware was
+saying something that is no longer true. The artifact is re-cut because the
+in-ZIP `README.md` and the manifest's `setup.guide` — which an operator reads
+*inside* the install wizard, on the step before the one that now asks — are part
+of the ZIP.
+
+### Changed
+
+- **The grants are documented as a UI flow, not a database procedure.**
+  [Operator Guide §4](./docs/OPERATOR-GUIDE.md#4-the-two-operator-grants) now
+  leads with the install wizard's **Permissions** step and the plugin page's
+  **Permissions** panel (`#grants`), and states that both take effect in
+  process — **no middleware restart**. The unified route
+  `GET|PUT /api/v1/admin/runtime/installed/:id/grants` with
+  `{ sql?, public_paths? }` is kept as the automation path, alongside the
+  older `…/public-paths` route, which #824 preserves unchanged as an alias.
+
+  The same rewrite lands in `README.md`, the in-ZIP
+  `packages/plugin/README.md`, and `setup.guide` **en + de** in the manifest.
+  The German copy uses the shipped UI labels (*Freigeben & aktivieren*,
+  *Überspringen*, *Übernehmen*), so the guide and the buttons next to it agree.
+
+- **Skipping the SQL grant is documented as a supported outcome.** This plugin
+  reaches for the database in `activate()`, so declining leaves it `errored` —
+  and the wizard says so rather than guessing. That is now written down, with
+  the recovery (grant from the panel; no reinstall, no restart), because an
+  operator who meets `errored` without having been told to expect it reads it
+  as a broken install.
+
+- **Uninstall purges both grant tables** on a core with #824, so a reinstall
+  starts un-granted and asks again instead of inheriting the previous package's
+  database access and unauthenticated surface. §10 said the opposite, which was
+  true when it was written.
+
+- **`scripts/acceptance-local.mjs` drives the real operator path.** It probes
+  for the unified route and, when the core under test ships it, grants **after**
+  install over that route — the same call the wizard's *Grant & activate*
+  makes — and asserts the plugin comes back `active` out of the PUT, which is
+  the in-process re-activation actually working. Without the route it falls
+  back to the pre-#824 pair (hand INSERT before activation, `…/public-paths`
+  after) and the report names which ran. `§3.15` stops being permanently
+  undecided: purged grant rows are a PASS, rows left behind are a FAIL on a
+  core that promised to clear them and a BLOCKED on one that never did.
+
+  A consequence worth stating: on a #824 core the install now legitimately
+  reports `errored` between *configure* and *grant*, so the harness treats that
+  as the documented state rather than a failure. Calling it a FAIL would turn
+  the run red on the exact flow it exists to prove.
+
+- **`compat.core` is unchanged** at `>=1.5 <2.0`. #824 changed no
+  `@omadia/plugin-api` type, so there is no version to name and nothing to
+  raise: it changed how an operator *answers* the permissions, not what this
+  manifest declares. The manifest comment now records that, next to the C11 and
+  C15 entries, so the next person does not have to re-derive it.
+
+### Known
+
+- **Cores older than #824 are unaffected and still documented.** The hand
+  `INSERT` plus restart moved to
+  [Operator Guide Appendix A](./docs/OPERATOR-GUIDE.md#appendix-a--older-cores)
+  rather than being deleted — a plugin release outlives the core release it was
+  written against, and the version number cannot distinguish them. §4 gives the
+  one-line probe that can: `GET …/grants` answers 200 on a core that has it.
+
+- **G4 is only partly closed.** #824 made the *re-activation* path truthful, so
+  a grant applied from the panel records `errored` with its reason instead of
+  swallowing the hook's failure. The **install** path still writes `active`
+  before running the hook, so the original sharp edge survives on a fresh
+  install (§12).
+
 ## 0.3.2 — 2026-08-21
 
 The runner image is now published **automatically from this repository**. No

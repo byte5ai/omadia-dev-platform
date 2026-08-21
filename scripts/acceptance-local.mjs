@@ -15,13 +15,23 @@
  *   ADMIN_PASSWORD default omadia-local-dev-1
  *   PLUGIN_ZIP    default packages/plugin/out/<name>-<version>.zip
  *   DATABASE_URL  optional; enables the DB-backed rows (ledger, table counts,
- *                 the SQL grant INSERT). Without it those rows report BLOCKED
- *                 rather than silently passing.
+ *                 and the pre-C16 SQL grant INSERT). Without it those rows
+ *                 report BLOCKED rather than silently passing. Not needed for
+ *                 the grants themselves on a core with the C16 route.
  *   PHASE         `install` (default: full install→probe→uninstall→reinstall)
  *                 or `probe` (assume already installed; probe only)
  *
  * IDEMPOTENT. It uninstalls a previous install before installing, and tolerates
  * a missing one. Re-running it is the normal case, not a special case.
+ *
+ * THE TWO GRANTS follow whichever surface the core under test ships. With core
+ * C16 (byte5ai/omadia#824) that is the unified
+ * `PUT …/installed/:id/grants` — the route the install wizard's Permissions
+ * step and the plugin page's Grants panel both call — driven AFTER install, in
+ * the operator's real order. Without it the run falls back to the pre-#824
+ * pair: a hand INSERT into `plugin_sql_grants` before activation, plus the
+ * `…/public-paths` route after. The report names which one ran, because
+ * "granted" over two different mechanisms is two different claims.
  *
  * EXIT CODE is the number of FAILed rows, capped at 250. BLOCKED does not fail
  * the run — a blocked row is a row this harness could not reach a verdict on,
@@ -201,11 +211,94 @@ async function upload(zipPath) {
   return { status: res.status, body };
 }
 
-/** The C7 SQL grant. There is NO HTTP endpoint for it — see the run report's
- *  core-gap list — so this goes in over SQL, and says so when it cannot. */
-async function grantSql() {
+// --- the two operator grants -----------------------------------------------
+//
+// Core C16 (byte5ai/omadia#824) gave both permissions ONE route and a UI that
+// calls it. That route is what a real operator's clicks reach, so it is what
+// this harness drives — the point of an acceptance run is to walk the path the
+// operator walks, not a private shortcut only the harness knows.
+//
+// It cannot simply assume the route though. This plugin outlives the core
+// release it was written against, and the pre-C16 procedure (a hand INSERT plus
+// the `/public-paths` route) is still the only one an older core offers. So:
+// probe once, prefer the unified route, fall back otherwise — and SAY which one
+// ran, because "granted" over two different mechanisms is two different claims
+// about the system under test.
+
+const GRANTS = `/api/v1/admin/runtime/installed/${PID}/grants`;
+const DECLARED_PUBLIC_PATHS = ['/api/v1/dev-runner', '/api/webhooks/github', '/api/v1/dev-platform'];
+
+/** `true` / `false` once probed, `undefined` while still unknown. */
+let hasUnifiedGrants;
+
+/**
+ * Does this core ship the C16 route? Answered ONLY in the affirmative here.
+ *
+ * A missing route and a not-installed plugin both answer 404, and core's 404
+ * body is not stable enough to tell them apart. This probe runs before the
+ * clean slate, when the previous run's install may or may not still be there,
+ * so a 404 proves nothing and is deliberately not recorded as a `false`. What
+ * a 200 carrying a `declared` block does prove is that the route exists — and
+ * that is the only thing worth changing the run's ordering over.
+ *
+ * Left `undefined`, the run keeps the pre-C16 ordering, which is correct on
+ * every core; `grantUnified()` then settles the question after install, where
+ * a 404 IS conclusive.
+ */
+async function probeUnifiedGrants() {
+  const { status: s, body } = await json(GRANTS);
+  if (s === 200 && body && typeof body === 'object' && body.declared) hasUnifiedGrants = true;
+  return hasUnifiedGrants;
+}
+
+/** Both grants over the C16 route, exactly as the wizard's "Grant & activate"
+ *  and the plugin page's Grants panel do. Returns false when the route is not
+ *  there, so the caller can fall back. */
+async function grantUnified() {
+  const { status: s, body } = await json(GRANTS, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sql: true, public_paths: DECLARED_PUBLIC_PATHS }),
+  });
+  if (s === 404) {
+    hasUnifiedGrants = false;
+    return false;
+  }
+  hasUnifiedGrants = true;
+  if (s !== 200) {
+    fail('§3.8', 'both grants (C16 unified PUT)', `HTTP ${s} ${JSON.stringify(body).slice(0, 200)}`);
+    return true;
+  }
+
+  // The route answers with the state it read back AFTER re-activating. Trust
+  // that, not the 200: a 200 proves the write landed, not that the plugin came
+  // back up, and the whole reason C16 re-activates in-process is so the answer
+  // to "did the grant take?" is available now rather than after a restart.
+  const g = body.granted ?? {};
+  const paths = g.public_paths ?? [];
+  const missing = DECLARED_PUBLIC_PATHS.filter((p) => !paths.includes(p));
+  if (g.sql === true && missing.length === 0) {
+    pass('§3.8', 'both grants (C16 unified PUT)', `sql=true, ${paths.length} public paths, state=${body.state}`);
+  } else {
+    fail('§3.8', 'both grants (C16 unified PUT)', `sql=${g.sql} missing=${JSON.stringify(missing)} state=${body.state}`);
+  }
+
+  if (body.state === 'active') {
+    pass('§3.8', 'grant takes effect in-process (no restart)', 'state=active straight out of the PUT');
+  } else {
+    fail('§3.8', 'grant takes effect in-process (no restart)',
+      `state=${body.state} error=${JSON.stringify(body.last_activation_error).slice(0, 200)}`);
+  }
+  return true;
+}
+
+/** Pre-C16 SQL grant: no HTTP endpoint exists, so it goes in over SQL and says
+ *  so when it cannot. Must run BEFORE activation — `ctx.services.get` is
+ *  synchronous, so the grant is read once while the plugin's context is built
+ *  and a row written afterwards reaches a context that has already decided. */
+async function grantSqlLegacy() {
   if (!process.env['DATABASE_URL']) {
-    blocked('§3.8', 'SQL grant (permissions.sql)', 'no DATABASE_URL and core exposes no HTTP grant endpoint');
+    blocked('§3.8', 'SQL grant (permissions.sql)', 'no DATABASE_URL — the pre-C16 grant path is a direct INSERT and needs one');
     return;
   }
   await db(
@@ -213,21 +306,37 @@ async function grantSql() {
      ON CONFLICT (plugin_id) DO UPDATE SET ledger=EXCLUDED.ledger, granted_at=now()`,
     [PLUGIN_ID, LEDGER, EMAIL],
   );
-  pass('§3.8', 'SQL grant (permissions.sql)', 'inserted into plugin_sql_grants (no HTTP endpoint exists)');
+  pass('§3.8', 'SQL grant (permissions.sql)', 'inserted into plugin_sql_grants (pre-C16 core: no HTTP endpoint)');
 }
 
-async function grantPublicPaths() {
-  const declared = ['/api/v1/dev-runner', '/api/webhooks/github', '/api/v1/dev-platform'];
+/** The C4 route. Kept as a thin alias by C16, so this exercises the promise
+ *  that pre-#824 automation still works — on both cores. */
+async function grantPublicPathsLegacy() {
   const { status: s, body } = await json(`/api/v1/admin/runtime/installed/${PID}/public-paths`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ paths: declared }),
+    body: JSON.stringify({ paths: DECLARED_PUBLIC_PATHS }),
   });
-  if (s === 200) pass('§3.8', 'public-path consent (C4 PUT)', `granted ${declared.length}: ${JSON.stringify(body.paths ?? body)}`);
+  if (s === 200) pass('§3.8', 'public-path consent (C4 PUT)', `granted ${DECLARED_PUBLIC_PATHS.length}: ${JSON.stringify(body.paths ?? body)}`);
   else fail('§3.8', 'public-path consent (C4 PUT)', `HTTP ${s} ${JSON.stringify(body).slice(0, 160)}`);
 }
 
-async function install() {
+/** Everything a plugin needs granted, over whichever surface this core has.
+ *  Called AFTER install, which is the operator's real order on a C16 core. */
+async function grantAll() {
+  if (hasUnifiedGrants !== false && (await grantUnified())) return;
+  await grantPublicPathsLegacy();
+}
+
+/**
+ * @param {{ sqlGrantedBeforeActivation?: boolean }} opts
+ *   Whether the SQL grant is already on record when `activate()` runs. On a
+ *   pre-C16 core it always is — the harness inserts the row first, because
+ *   nothing can re-activate the plugin afterwards. On a C16 core it deliberately
+ *   is NOT: the operator answers the wizard's Permissions step after configure,
+ *   and this run walks the same order.
+ */
+async function install({ sqlGrantedBeforeActivation = true } = {}) {
   const create = await postJson(`/api/v1/install/plugins/${PID}`, {});
   if (create.status !== 201) {
     fail('§3.6', 'install job created', `HTTP ${create.status} ${JSON.stringify(create.body).slice(0, 240)}`);
@@ -241,8 +350,20 @@ async function install() {
     values: { llm_allowed_models: ['claude-sonnet-4-5-20250929'], runner_base_url: BASE },
   });
   const st = conf.body?.job?.state;
-  if (st === 'active') pass('§3.9', 'activation', `state=active, no error`);
-  else fail('§3.9', 'activation', `state=${st} error=${JSON.stringify(conf.body?.job?.error).slice(0, 300)}`);
+  const err = JSON.stringify(conf.body?.job?.error).slice(0, 300);
+  if (st === 'active') {
+    pass('§3.9', 'activation', 'state=active, no error');
+  } else if (!sqlGrantedBeforeActivation && st === 'errored') {
+    // Not a failure — the documented consequence of installing before granting.
+    // This plugin reaches for the database in `activate()`, so with the C16
+    // wizard the honest state between "configured" and "granted" is `errored`,
+    // and the grant PUT that follows is what has to bring it back up. Calling
+    // this a FAIL would make the harness red on the exact flow it is meant to
+    // prove works.
+    pass('§3.9', 'activation', `state=errored before the grant, as documented — ${err.slice(0, 140)}`);
+  } else {
+    fail('§3.9', 'activation', `state=${st} error=${err}`);
+  }
   return job.id;
 }
 
@@ -402,19 +523,32 @@ async function probeUninstallCycle() {
     if (before && a.repos === before[0].n) pass('D3', 'row data survives uninstall', `dev_repos ${before[0].n} → ${a.repos}`);
   } else blocked('D3', 'uninstall KEEPS the 9 tables + ledger', 'no DATABASE_URL');
 
+  // C16 B6 settled the lifecycle acceptance.md §3.15 left open: uninstall
+  // purges BOTH grant tables, so a reinstall under the same id starts
+  // un-granted instead of inheriting the previous package's database access and
+  // unauthenticated surface. On a pre-C16 core the rows stay — orphaned rather
+  // than live, since the runtime stops honouring them — so the verdict is a
+  // BLOCKED there and a real FAIL on a core that promised to clear them.
   const orphanSql = await db(`SELECT count(*)::int AS n FROM plugin_sql_grants WHERE plugin_id=$1`, [PLUGIN_ID]).catch(() => undefined);
   const orphanPub = await db(`SELECT count(*)::int AS n FROM plugin_public_path_grants WHERE plugin_id=$1`, [PLUGIN_ID]).catch(() => undefined);
   if (orphanSql && orphanPub) {
-    record('§3.15', 'grant rows after uninstall (lifecycle undecided)',
-      orphanSql[0].n === 0 && orphanPub[0].n === 0 ? 'PASS' : 'BLOCKED',
-      `plugin_sql_grants=${orphanSql[0].n} plugin_public_path_grants=${orphanPub[0].n} — acceptance.md §3.15 leaves this unanswered`);
+    const cleared = orphanSql[0].n === 0 && orphanPub[0].n === 0;
+    const counts = `plugin_sql_grants=${orphanSql[0].n} plugin_public_path_grants=${orphanPub[0].n}`;
+    if (cleared) {
+      pass('§3.15', 'uninstall purges the grant rows (C16 B6)', `${counts} — a reinstall asks again`);
+    } else if (hasUnifiedGrants) {
+      fail('§3.15', 'uninstall purges the grant rows (C16 B6)', `${counts} — this core ships C16 and should have cleared both`);
+    } else {
+      blocked('§3.15', 'uninstall purges the grant rows (C16 B6)', `${counts} — pre-C16 core keeps them; orphaned, not honoured`);
+    }
   }
 
-  // reinstall, lossless
-  await grantSql();
-  const jobId = await install();
+  // reinstall, lossless — and, on a C16 core, un-granted, so the grants have to
+  // be given again exactly as they were the first time.
+  if (hasUnifiedGrants !== true) await grantSqlLegacy();
+  const jobId = await install({ sqlGrantedBeforeActivation: hasUnifiedGrants !== true });
   if (jobId) {
-    await grantPublicPaths();
+    await grantAll();
     const led = await db(`SELECT count(*)::int AS n FROM ${LEDGER}`).catch(() => undefined);
     const repos = await db(`SELECT count(*)::int AS n FROM dev_repos`).catch(() => undefined);
     if (led && repos) {
@@ -445,14 +579,21 @@ async function main() {
   pass('setup', 'admin session', `logged in as ${EMAIL}`);
 
   if (PHASE === 'install') {
+    // Probe BEFORE the clean slate, while a previous run's install is still
+    // there to probe against. The answer decides ORDERING: on a pre-C16 core
+    // the SQL grant must exist before activation, because there is no route to
+    // re-activate the plugin afterwards.
+    await probeUnifiedGrants();
+    if (hasUnifiedGrants) record('setup', 'grant surface', 'PASS', 'core ships the C16 unified route — granting the way the wizard does, after install');
+
     await cleanSlate();
     const zip = resolveZip();
     const up = await upload(zip);
     if (up.status === 201) pass('§3.6', 'ZIP uploaded', `${basename(zip)} ${up.body?.package?.zip_bytes} bytes sha=${String(up.body?.package?.sha256).slice(0, 12)}`);
     else fail('§3.6', 'ZIP uploaded', `HTTP ${up.status} ${JSON.stringify(up.body).slice(0, 200)}`);
-    await grantSql();
-    await install();
-    await grantPublicPaths();
+    if (hasUnifiedGrants !== true) await grantSqlLegacy();
+    await install({ sqlGrantedBeforeActivation: hasUnifiedGrants !== true });
+    await grantAll();
   }
 
   await verifyInstalled();
