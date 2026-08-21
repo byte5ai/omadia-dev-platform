@@ -37,6 +37,7 @@ const manifest = readFileSync(resolve(pkgRoot, 'manifest.yaml'), 'utf8');
 const pkg = JSON.parse(readFileSync(resolve(pkgRoot, 'package.json'), 'utf8')) as {
   name: string;
   version: string;
+  files?: string[];
   peerDependencies?: Record<string, string>;
 };
 
@@ -104,6 +105,87 @@ void describe('manifest', () => {
     // identifier or start a statement.
     assert.match(ledger ?? '', /^[a-z][a-z0-9_]{2,62}$/);
     assert.ok((ledger ?? '').length <= 63);
+  });
+
+  void it('permissions.sql.handoff names a plan the ZIP ships', () => {
+    // Epic #470 C15 (core byte5ai/omadia#814). Declaring this is what makes the
+    // KERNEL run the handoff before its own migration runner; without it the
+    // `activate()` call is structurally too late and `skippedNoWitness` never
+    // fires. A declaration pointing at a file the ZIP does not ship is worse
+    // than no declaration: the kernel refuses the activation outright.
+    const handoff = scalar(4, 'handoff');
+    assert.equal(handoff, 'handoff-plan.json');
+    assert.ok(
+      existsSync(resolve(pkgRoot, handoff ?? '')),
+      'the kernel reads this file at activation and refuses to activate without it',
+    );
+    assert.ok(
+      (pkg.files ?? []).includes(handoff ?? ''),
+      'declared but not in package.json `files` — present in the repo, absent from the ZIP, ' +
+        'so every real installation would refuse to activate while every local test passed',
+    );
+  });
+
+  void it('the declared plan is one the kernel will accept', () => {
+    // The kernel's reader (`platform/pluginHandoffPlan.ts`) is STRICTER than
+    // the operator CLI's: it rejects unknown keys, refuses duplicate
+    // filenames, and caps the file size. A plan this repo is happy with but
+    // the kernel refuses fails at INSTALL time, on the operator's machine,
+    // where nobody can fix it. So the kernel's rules are checked here.
+    const path = resolve(pkgRoot, 'handoff-plan.json');
+    const raw = readFileSync(path, 'utf8');
+    assert.ok(
+      Buffer.byteLength(raw, 'utf8') <= 128 * 1024,
+      'over the kernel\'s 128 KiB plan cap',
+    );
+
+    const plan = JSON.parse(raw) as Record<string, unknown> & {
+      entries: { filename: string; witnessSql: string }[];
+    };
+
+    // `pluginId` / `ledger` / `migrationsDir` are the operator CLI's — it runs
+    // with no manifest and has to be told them. The kernel accepts and ignores
+    // them so ONE file serves both readers. Everything else is a typo or a key
+    // from a core this package was not built against, and the kernel refuses
+    // rather than ignoring it. `dir` is the one that earns the strictness:
+    // `SeedLedgerOptions` accepts it, so it looks like it should work here.
+    const allowed = ['pluginId', 'ledger', 'migrationsDir', 'entries', 'dryRun'];
+    for (const key of Object.keys(plan)) {
+      assert.ok(allowed.includes(key), `key '${key}' would be refused by the kernel`);
+    }
+
+    assert.ok(Array.isArray(plan.entries) && plan.entries.length > 0);
+    const seen = new Set<string>();
+    for (const entry of plan.entries) {
+      assert.ok(
+        typeof entry.filename === 'string' && entry.filename.length > 0,
+        'every entry needs a filename',
+      );
+      assert.ok(
+        typeof entry.witnessSql === 'string' && entry.witnessSql.trim().length > 0,
+        `entry '${entry.filename}' has no witness — a file with no proof is never seeded`,
+      );
+      assert.ok(!seen.has(entry.filename), `'${entry.filename}' is listed twice`);
+      seen.add(entry.filename);
+      assert.ok(
+        existsSync(resolve(pkgRoot, 'migrations', entry.filename)),
+        `'${entry.filename}' is not in the migrations directory the ZIP ships`,
+      );
+    }
+
+    // A plan whose ledger disagrees with the manifest makes the kernel warn:
+    // the operator dry-ran against one table and the kernel writes another.
+    assert.equal(
+      plan.ledger,
+      scalar(4, 'ledger'),
+      'the plan and the manifest must name the same ledger, or the dry run an operator trusted described a different table',
+    );
+    assert.equal(plan.migrationsDir, scalar(4, 'migrations'));
+    assert.equal(plan.pluginId, pkg.name);
+
+    // The kernel takes the directory from the manifest and nowhere else, so a
+    // plan asking for a dry run would leave the real handoff undone forever.
+    assert.notEqual(plan.dryRun, true, 'a shipped plan must not ship a dry run');
   });
 
   void it('permissions.sql.migrations names the directory the ZIP ships', () => {

@@ -21,7 +21,7 @@ identity:
   # settled on (specs/470-dev-platform-plugin/plan.md §4.1). There is no
   # "platform" kind.
   kind: "extension"
-  version: "0.3.0"
+  version: "0.3.1"
   domain: "dev-platform"
   description: "The Omadia Dev Platform — dev jobs, runner orchestration, the job pipeline, its own HTTP routes, chat tools and database migrations. Extracted from omadia core into its own installable plugin (epic byte5ai/omadia#470)."
   authors:
@@ -107,6 +107,35 @@ permissions:
   sql:
     migrations: "migrations"
     ledger: "plg_omadia_dev_platform_migrations"
+
+    # Epic #470 C15 (core issue byte5ai/omadia#814) — the ledger handoff, named
+    # here so the KERNEL performs it, before it runs `migrations:` above.
+    #
+    # C11 gave this plugin `ctx.sql.seedLedger` and documented it as "call this
+    # before runMigrations". `activate()` does exactly that (src/plugin.ts §3),
+    # and on a kernel that runs `migrations:` itself it is TOO LATE: the nine
+    # ledger rows are already written by the time activate() is entered, so the
+    # handoff can only report `alreadySeeded` and `skippedNoWitness` — the one
+    # alarm C11 exists to raise — never fires. The 2026-08-21 acceptance run
+    # measured it: `0 seeded, 9 already seeded` on the exact upgrade the feature
+    # was built for, indistinguishable in the log from a healthy re-run.
+    #
+    # This is not something the plugin can fix by reordering its own code. The
+    # witnesses are knowledge only this plugin has; the ordering is a decision
+    # only the kernel can make. So the plan is DECLARED here and the kernel
+    # executes it first.
+    #
+    # The file is the same one `plugin-ledger-handoff.mjs --plan` reads, so an
+    # operator can dry-run the exact plan against production before installing.
+    # Its `pluginId` / `ledger` / `migrationsDir` are for that CLI, which has no
+    # manifest to read them from; the kernel knows all three authoritatively and
+    # ignores the file's copies (it warns if `ledger` disagrees with the one
+    # above, because then the table previewed is not the table written).
+    #
+    # The `activate()` call STAYS. On a kernel older than this feature it is the
+    # only thing that performs the handoff; on a kernel that honours this line
+    # it reports `alreadySeeded`, which is correct — the work is already done.
+    handoff: "handoff-plan.json"
 
   # Epic #470 C4 / H1 — the prefixes served WITHOUT a kernel session, declared
   # here so the operator sees the request at install time and grants it

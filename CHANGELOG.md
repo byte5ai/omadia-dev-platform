@@ -4,6 +4,51 @@ All notable changes to `@omadia/dev-platform`. The version that matters is
 `packages/plugin/manifest.yaml` — the hub reads the manifest, and `npm run
 package` aborts if it disagrees with `packages/plugin/package.json`.
 
+## 0.3.1 — 2026-08-21
+
+Declares the ledger handoff in the manifest so the KERNEL performs it, closing
+gap G7 of the 2026-08-21 acceptance run (core issue byte5ai/omadia#814, epic
+#470 C15). Requires `@omadia/plugin-api` **1.6.0**; older cores ignore the new
+key and keep the previous behaviour.
+
+### Fixed
+
+- **The C11 ledger handoff could never actually seed.** `activate()` calls
+  `ctx.sql.seedLedger` before `runMigrations`, exactly as C11 documented — but
+  core runs `permissions.sql.migrations` ITSELF, before `activate()`, so by the
+  time the plugin got control all nine ledger rows were already written. The
+  handoff could only ever report `alreadySeeded`, and `skippedNoWitness` — the
+  one alarm the feature exists to raise — never fired. The acceptance run
+  measured `0 seeded, 9 already seeded` on the exact upgrade the feature was
+  built for, and nothing went red: that line is indistinguishable from a healthy
+  re-run.
+
+  This was not fixable from inside the plugin. Core calls the runner before
+  handing over control, and the witnesses are knowledge only this plugin has.
+  So the plan is now DECLARED and core executes it first.
+
+### Changed
+
+- **`permissions.sql.handoff: handoff-plan.json`.** The kernel reads the plan
+  and runs the handoff ahead of its own migration runner. The file is the one
+  already in the ZIP — the same one `plugin-ledger-handoff.mjs --plan` reads —
+  so an operator can still dry-run the exact plan against production before
+  installing anything.
+- **The `activate()` `seedLedger` call stays, as the fallback.** On a kernel
+  that honours `handoff` it reports `alreadySeeded`, which is correct once the
+  work is done; on an older kernel it remains the only thing that performs the
+  handoff at all. Removing it would silently drop adoption on every older core.
+
+### Added
+
+- `test/manifest.test.ts` pins the two things the declaration introduces: that
+  `handoff` names a file the ZIP actually ships (declaring one the ZIP omits
+  makes core refuse the activation outright, while every local test still
+  passes), and that the plan satisfies core's STRICTER reader — no unknown keys
+  (notably `dir`), no duplicate filenames, under the 128 KiB cap, every
+  filename present in `migrations/`, and a `ledger` that agrees with the
+  manifest's so core does not warn about a split-brain dry run.
+
 ## 0.3.0 — 2026-08-21
 
 Verification pass against omadia core `origin/main` (`9feb3ad3`), the first core
