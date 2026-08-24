@@ -59,7 +59,8 @@ find module" errors that say nothing about the real cause.
 npm run typecheck && npm run build && npm test && npm run package -w packages/plugin
 ```
 
-All four must pass. CI runs exactly these.
+All four must pass. CI runs exactly these, plus a standalone `npm run check:lock`
+before it installs — see [Versioning](#versioning).
 
 ### Running the Postgres suites
 
@@ -147,10 +148,26 @@ same PR.
 
 ## Versioning
 
-The version lives in **two** files: `packages/plugin/package.json` and
-`packages/plugin/manifest.yaml`. The hub reads the manifest. `npm run package`
-aborts on drift between them, and on drift between `identity.id` and the package
-name — do not work around the guard, fix the version.
+The version lives in **three** files: `packages/plugin/package.json`,
+`packages/plugin/manifest.yaml` and the root `package-lock.json`. The hub reads
+the manifest. `npm run package` aborts on drift between any of them, and on drift
+between `identity.id` and the package name — do not work around the guard, fix
+the version. CI runs the lockfile half of that check on its own, before `npm ci`.
+
+The lockfile is the one you have to edit **by hand**:
+
+```jsonc
+// package-lock.json, under "packages"
+"packages/plugin": { "version": "0.3.4", ... }
+```
+
+Do **not** run `npm install --package-lock-only`. It repairs the member entry and,
+in the same pass, rewrites `"../odoo-bot/middleware/packages/plugin-api"` from
+whichever core checkout happens to sit next to this repo on your machine. That
+number describes a laptop, not this repository, and it must never land in a
+public lockfile. `npm ci` needs no regeneration after a hand edit — the dependency
+tree does not move when a member version does, which is exactly why the drift went
+unnoticed for three releases ([#16][issue16]).
 
 ## Publishing
 
@@ -167,3 +184,4 @@ This repository receives the Dev Platform extraction described in
 not part of making this repo a working plugin, belong in the omadia repo instead.
 
 [epic]: https://github.com/byte5ai/omadia/issues/470
+[issue16]: https://github.com/byte5ai/omadia-dev-platform/issues/16
