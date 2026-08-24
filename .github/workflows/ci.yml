@@ -107,6 +107,19 @@ jobs:
           ./node_modules/.bin/tsc -p packages/plugin-api
           test -f packages/plugin-api/dist/index.d.ts
 
+      # BEFORE `npm ci`, and deliberately so: `npm ci` exits 0 on a lockfile
+      # whose workspace member versions are wrong, because it reconstructs the
+      # dependency TREE and a member's own `version` field is not part of it.
+      # That is how `packages/plugin` stayed pinned at 0.3.1 through three
+      # releases (issue #16) with every check in this file green.
+      #
+      # The script has no dependencies, so it runs before anything is installed
+      # and the run dies in seconds instead of after the build. `npm run package`
+      # gates on the same assertion for the local path.
+      - name: Assert package-lock.json matches every workspace member
+        working-directory: omadia-dev-platform
+        run: node scripts/check-lock-sync.mjs
+
       - name: Install
         working-directory: omadia-dev-platform
         run: npm ci

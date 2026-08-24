@@ -61,6 +61,9 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// From the REPOSITORY's `scripts/`, not this package's: the lockfile is a
+// property of the workspace root and every member is a subject of it.
+import { assertLockInSync } from '../../../scripts/check-lock-sync.mjs';
 import {
   assertArchiveSize,
   assertStagedPayload,
@@ -182,6 +185,17 @@ if (manifestId !== pkg.name) {
     `identity drift: package.json name is ${pkg.name}, manifest.yaml id is ${String(manifestId)}.`,
   );
 }
+
+// --- lockfile drift guard --------------------------------------------------
+// The version lives in a THIRD file, and that one is not read by the hub, by
+// `tsc` or by `npm ci` — which is why `package-lock.json` sat at 0.3.1 through
+// three releases while everything above it moved (issue #16). A lockfile is the
+// most-read file in a public repository and the least-verified one here, so the
+// check runs where every release already passes: `npm run package`.
+//
+// It only ever READS. See `scripts/check-lock-sync.mjs` for why regenerating the
+// lockfile is the one repair that must not happen on a developer machine.
+assertLockInSync(repoRoot);
 
 // --- build gate ------------------------------------------------------------
 // Not "was it built?" — BUILD IT. The failure this replaces was a `tsc` that

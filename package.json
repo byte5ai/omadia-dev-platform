@@ -18,6 +18,7 @@
     "test": "npm run test -w packages/plugin && npm run test -w packages/runner-shim && npm run test -w sidecars/dev-runner-daemon && npm run test -w packages/ui",
     "package": "npm run package -w packages/plugin",
     "clean": "npm run clean --workspaces --if-present && rm -rf node_modules",
+    "check:lock": "node scripts/check-lock-sync.mjs",
     "link:core": "node scripts/link-core.mjs",
     "codegen:migrations": "npm run codegen:migrations -w packages/plugin"
   },
