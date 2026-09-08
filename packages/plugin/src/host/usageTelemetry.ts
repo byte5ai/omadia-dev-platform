@@ -62,10 +62,14 @@ export const CACHE_WRITE_MULTIPLIER = 1.25;
 /** Exact-id price table. Falls through to family matching for anything else. */
 const EXACT_PRICES: Readonly<Record<string, ModelPrice>> = {
   // --- Anthropic (input_tokens excludes cached; multiplier-based cache) ------
+  'claude-opus-5': { inputPerMTok: 5, outputPerMTok: 25 },
   'claude-opus-4-8': { inputPerMTok: 5, outputPerMTok: 25 },
   'claude-opus-4-7': { inputPerMTok: 5, outputPerMTok: 25 },
   'claude-opus-4-6': { inputPerMTok: 5, outputPerMTok: 25 },
   'claude-opus-4-5': { inputPerMTok: 5, outputPerMTok: 25 },
+  // Sonnet 5 is CHEAPER than 4.6 — without this exact entry the generic
+  // 'sonnet' family fallback would over-bill it at the old $3/$15 rate.
+  'claude-sonnet-5': { inputPerMTok: 2, outputPerMTok: 10 },
   'claude-sonnet-4-6': { inputPerMTok: 3, outputPerMTok: 15 },
   'claude-sonnet-4-5': { inputPerMTok: 3, outputPerMTok: 15 },
   'claude-haiku-4-5': { inputPerMTok: 1, outputPerMTok: 5 },
