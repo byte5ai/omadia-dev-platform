@@ -99,11 +99,19 @@ jobs:
       #
       # plugin-api has no dependencies of its own: typescript + @types/node are
       # the whole toolchain, which is why core's middleware is never installed.
+      #
+      #  3. `--legacy-peer-deps`: even with `--no-workspaces`, npm 10.9's
+      #     arborist still walks the peer-dependency web of core's OWN tree
+      #     when building the ideal tree, and since core moved to vite 8 /
+      #     vitest 4.1 that walk dies inside `#loadPeerSet` with
+      #     "Cannot read properties of null (reading 'edgesOut')" — before a
+      #     single byte of typescript is installed. Nothing here needs peer
+      #     resolution (two leaf packages), so skipping it is the whole fix.
       - name: Build @omadia/plugin-api from the sibling checkout
         working-directory: odoo-bot/middleware
         run: |
           npm install --ignore-scripts --no-save --no-package-lock --no-workspaces \
-            typescript@^6.0.2 @types/node@^25.6.0
+            --legacy-peer-deps typescript@^6.0.2 @types/node@^25.6.0
           ./node_modules/.bin/tsc -p packages/plugin-api
           test -f packages/plugin-api/dist/index.d.ts
 

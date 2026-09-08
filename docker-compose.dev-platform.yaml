@@ -73,7 +73,7 @@ services:
       # instant, silent-to-the-runner 500 with zero tokens spent. Comma-separated,
       # exact string match (llmProxy.ts: `policy.allowedModels.includes(model)`)
       # against whatever `--model` the CLI actually reports in its init message.
-      DEV_PLATFORM_LLM_ALLOWED_MODELS: ${DEV_PLATFORM_LLM_ALLOWED_MODELS:-claude-opus-4-8[1m],claude-opus-4-8,claude-sonnet-4-8[1m],claude-sonnet-4-8}
+      DEV_PLATFORM_LLM_ALLOWED_MODELS: ${DEV_PLATFORM_LLM_ALLOWED_MODELS:-claude-opus-5[1m],claude-opus-5,claude-sonnet-5[1m],claude-sonnet-5,claude-opus-4-8[1m],claude-opus-4-8}
       # Egress allowlist entries every job gets in ADDITION to the middleware
       # host + its own repo's forge host (deriveJobPolicy.ts). Absent by
       # default (config.ts), which is correct for a repo needing no package
