@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { useRouter, useSearchParams } from '@/lib/router';
+import { routes, useRouter, useSearchParams } from '@/lib/router';
 import { useTranslations } from '@/lib/i18n';
 
 import { Button } from '@/components/ui/Button';
@@ -47,7 +47,7 @@ export function HubScreen(): React.ReactElement {
     (next: Tab) => {
       const q = new URLSearchParams(params?.toString() ?? '');
       q.set('tab', next);
-      router.replace(`/admin/dev-platform?${q.toString()}`);
+      router.replace(routes.hub(q));
     },
     [params, router],
   );
@@ -146,7 +146,7 @@ function ReposTab(): React.ReactElement {
           onClose={() => setNewJobRepo(null)}
           onCreated={(jobId) => {
             setNewJobRepo(null);
-            router.push(`/admin/dev-platform/jobs/${encodeURIComponent(jobId)}`);
+            router.push(routes.job(jobId));
           }}
         />
       ) : null}

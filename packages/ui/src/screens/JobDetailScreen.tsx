@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { Link, useRouter, useSearchParams } from '@/lib/router';
+import { Link, routes, useRouter, useSearchParams } from '@/lib/router';
 import { useFormatter, useTranslations } from '@/lib/i18n';
 
 import { Button } from '@/components/ui/Button';
@@ -171,7 +171,7 @@ export function JobDetailScreen({ jobId }: { jobId: string }): React.ReactElemen
     (phase: DevJobUiPhase) => {
       const q = new URLSearchParams(search?.toString() ?? '');
       q.set('phase', phase);
-      router.replace(`/admin/dev-platform/jobs/${encodeURIComponent(id)}?${q.toString()}`);
+      router.replace(routes.job(id, q));
     },
     [id, router, search],
   );
@@ -198,7 +198,7 @@ export function JobDetailScreen({ jobId }: { jobId: string }): React.ReactElemen
             {job ? <span className="text-fg-muted">{job.kind}</span> : null}
             {job ? (
               <Link
-                href={`/admin/dev-platform?tab=jobs`}
+                href={routes.hubTab('jobs')}
                 className="text-accent underline"
               >
                 {job.repoId.slice(0, 8)}
@@ -289,7 +289,7 @@ export function JobDetailScreen({ jobId }: { jobId: string }): React.ReactElemen
         onConfirm={() => {
           setConfirmDelete(false);
           void deleteJob(id).then(
-            () => router.push('/admin/dev-platform?tab=jobs'),
+            () => router.push(routes.hubTab('jobs')),
             () => {},
           );
         }}

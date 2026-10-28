@@ -160,6 +160,27 @@ export function Link({
   );
 }
 
+function withQuery(path: string, query?: URLSearchParams): string {
+  const q = query?.toString() ?? '';
+  return q ? `${path}?${q}` : path;
+}
+
+/**
+ * The navigation targets `matchRoute` understands. Every link and every
+ * `router.push`/`replace` goes through these: the screens were ported from
+ * core's `app/admin/dev-platform/…` pages and kept navigating to
+ * `/admin/dev-platform…`, a path this router has never known, so every view
+ * but the start view ended in "Unknown route" (byte5ai/omadia#1466).
+ */
+export const routes = {
+  hub: (query?: URLSearchParams): string => withQuery('/', query),
+  hubTab: (tab: string): string => `/?tab=${encodeURIComponent(tab)}`,
+  job: (id: string, query?: URLSearchParams): string =>
+    withQuery(`/jobs/${encodeURIComponent(id)}`, query),
+  repoNew: (): string => '/repos/new',
+  repo: (id: string): string => `/repos/${encodeURIComponent(id)}`,
+} as const;
+
 /**
  * Match `/jobs/:id` and `/repos/:id` against the current path.
  * Deliberately not a pattern engine: there are four routes, and a matcher

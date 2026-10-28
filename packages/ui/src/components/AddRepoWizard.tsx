@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 
-import { Link } from '@/lib/router';
+import { Link, routes } from '@/lib/router';
 import { useTranslations } from '@/lib/i18n';
 
 import { Button } from '@/components/ui/Button';
@@ -85,7 +85,7 @@ export function AddRepoWizard(): React.ReactElement {
           <ProtectionCheckList branch={created.defaultBranch} ok={created.branchProtectionOk} />
         </div>
         <div className="mt-6 flex gap-2">
-          <Link href="/admin/dev-platform?tab=repos">
+          <Link href={routes.hubTab('repos')}>
             <Button variant="primary">{t('done.toList')}</Button>
           </Link>
         </div>

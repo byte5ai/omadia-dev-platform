@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { Link } from '@/lib/router';
+import { Link, routes } from '@/lib/router';
 import { useTranslations } from '@/lib/i18n';
 
 import { Button } from '@/components/ui/Button';
@@ -51,7 +51,7 @@ export function RepoTable({
         <h2 className="text-base font-semibold text-fg-strong">{t('empty.heading')}</h2>
         <p className="mt-2 text-sm text-fg-muted">{t('empty.body')}</p>
         <div className="mt-4 flex justify-center">
-          <Link href="/admin/dev-platform/repos/new">
+          <Link href={routes.repoNew()}>
             <Button variant="primary" size="sm">
               {t('empty.cta')}
             </Button>
@@ -65,7 +65,7 @@ export function RepoTable({
     <div>
       <div className="mb-3 flex items-center justify-between">
         <span className="text-sm text-fg-muted">{t('count', { count: repos.length })}</span>
-        <Link href="/admin/dev-platform/repos/new">
+        <Link href={routes.repoNew()}>
           <Button variant="primary" size="sm">
             {t('add')}
           </Button>
@@ -117,7 +117,7 @@ export function RepoTable({
                       <Button size="sm" variant="secondary" onClick={() => onNewJob(repo)}>
                         {t('newJob')}
                       </Button>
-                      <Link href={`/admin/dev-platform/repos/${encodeURIComponent(repo.id)}`}>
+                      <Link href={routes.repo(repo.id)}>
                         <Button size="sm" variant="ghost">
                           {t('settings')}
                         </Button>
