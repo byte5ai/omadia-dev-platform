@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { Link } from '@/lib/router';
+import { Link, routes } from '@/lib/router';
 import { useFormatter, useTranslations } from '@/lib/i18n';
 
 import { Button } from '@/components/ui/Button';
@@ -92,7 +92,7 @@ export function JobTable({
                   <td className={tdCls}>{format.relativeTime(new Date(job.createdAt))}</td>
                   <td className={tdCls}>
                     <div className="flex justify-end gap-1">
-                      <Link href={`/admin/dev-platform/jobs/${encodeURIComponent(job.id)}`}>
+                      <Link href={routes.job(job.id)}>
                         <Button size="sm" variant="ghost">
                           {t('view')}
                         </Button>

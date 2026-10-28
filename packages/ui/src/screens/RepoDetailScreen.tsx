@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { Link } from '@/lib/router';
+import { Link, routes } from '@/lib/router';
 import { useTranslations } from '@/lib/i18n';
 
 import { Button } from '@/components/ui/Button';
@@ -116,7 +116,7 @@ function Shell({ children }: { children: React.ReactNode }): React.ReactElement 
   return (
     <div className="mx-auto w-full max-w-5xl px-6 py-12 lg:px-8 lg:py-8">
       <div className="mb-6">
-        <Link href="/admin/dev-platform?tab=repos" className="text-sm text-accent underline">
+        <Link href={routes.hubTab('repos')} className="text-sm text-accent underline">
           {t('back')}
         </Link>
       </div>

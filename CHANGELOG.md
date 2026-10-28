@@ -9,6 +9,22 @@ project versions the ARTIFACT, not the repository: a release is a ZIP an
 operator can install, so anything that does not change the ZIP does not get a
 version.
 
+## 0.3.6 — 2026-10-28
+
+### Fixed
+
+- **Every view but the start view showed "Unknown route"**
+  ([byte5ai/omadia#1466](https://github.com/byte5ai/omadia/issues/1466)). The
+  screens were ported from core's `app/admin/dev-platform/…` pages and kept
+  navigating to `/admin/dev-platform…`, which the plugin's hash router has
+  never known. Tab switches, "Add repository", repository settings, opening a
+  job, the phase rail, "back to jobs" and "back to repositories" all landed on
+  `#/admin/dev-platform…`. All twelve call sites now go through
+  `routes` in `packages/ui/src/lib/router.tsx`, which builds exactly the
+  paths `matchRoute` resolves. `test/navigation.test.tsx` clicks the tabs and
+  links, round-trips every builder through `matchRoute`, and fails on any
+  source line that navigates to `/admin/dev-platform` again.
+
 ## 0.3.4 — 2026-08-21
 
 Two supply-chain fixes with the same shape: a guarantee that had stopped being
