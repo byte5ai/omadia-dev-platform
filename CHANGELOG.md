@@ -9,7 +9,7 @@ project versions the ARTIFACT, not the repository: a release is a ZIP an
 operator can install, so anything that does not change the ZIP does not get a
 version.
 
-## 0.3.6 — 2026-10-28
+## 0.3.7 — 2026-10-28
 
 ### Fixed
 
@@ -24,6 +24,27 @@ version.
   paths `matchRoute` resolves. `test/navigation.test.tsx` clicks the tabs and
   links, round-trips every builder through `matchRoute`, and fails on any
   source line that navigates to `/admin/dev-platform` again.
+- **The repo budget input was unstyled in width.** It used `w-40`, which is not
+  in `vocabulary/classes.txt`, so the host sheet never styled it; the
+  vocabulary gate only started seeing it once the bundle changed shape. It now
+  uses `w-32`.
+
+## 0.3.6 — 2026-10-28
+
+### Fixed
+
+- **A theme, palette or language switch in the shell no longer reloads the
+  Dev Platform** ([byte5ai/omadia#1480](https://github.com/byte5ai/omadia/issues/1480)).
+  Core's host page re-keyed the iframe on every change, so the SPA started
+  over on the hub screen and the operator lost the open job, a half-filled
+  wizard and the scroll position. With core's new appearance channel the SPA
+  posts `omadia:plugin-ui:ready` to its parent and applies each
+  `omadia:plugin-ui:appearance` message in place: `data-theme`,
+  `data-palette` and `lang` on `<html>`, and the locale through the i18n
+  provider, without leaving the current hash route. Messages are only accepted
+  from the parent window on this origin and are validated like the query
+  string. A core without the channel ignores `ready` and keeps reloading as
+  before (`packages/ui/src/lib/hostAppearance.ts`).
 
 ## 0.3.4 — 2026-08-21
 

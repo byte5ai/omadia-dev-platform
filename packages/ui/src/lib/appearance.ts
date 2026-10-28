@@ -13,9 +13,9 @@
  *     reason, so nothing is needed here beyond linking it.
  *
  * The host page (`web-ui/app/plugin-ui/[pluginId]/_components/PluginUiFrame.tsx`)
- * passes `?theme=&palette=&locale=` and re-keys the iframe when any of them
- * changes, so a theme flip in the shell header reloads this document with the
- * new value rather than needing a postMessage channel.
+ * passes `?theme=&palette=&locale=` for the first paint. Later changes arrive
+ * over postMessage without a reload — see `hostAppearance.ts`
+ * (byte5ai/omadia#1480).
  *
  * ## Why this is a module and not an inline <script>
  *

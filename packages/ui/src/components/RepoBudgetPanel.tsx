@@ -14,7 +14,7 @@ import { patchRepo, type DevRepoView } from '@/lib/api';
  */
 
 const inputCls =
-  'w-40 rounded-md border-t border-r border-b border-l border-border bg-transparent px-3 py-2 text-sm ' +
+  'w-32 rounded-md border-t border-r border-b border-l border-border bg-transparent px-3 py-2 text-sm ' +
   'focus-visible:outline-none focus:border-accent';
 
 type ErrorKey = 'cost' | 'save';
