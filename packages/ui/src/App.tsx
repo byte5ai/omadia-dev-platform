@@ -3,6 +3,7 @@ import type { ReactElement } from 'react';
 import { I18nProvider } from '@/lib/i18n';
 import { RouterProvider, matchRoute, useRouter } from '@/lib/router';
 import type { Locale } from '@/lib/appearance';
+import { useHostLocale } from '@/lib/hostAppearance';
 import { HubScreen } from '@/screens/HubScreen';
 import { JobDetailScreen } from '@/screens/JobDetailScreen';
 import { RepoDetailScreen } from '@/screens/RepoDetailScreen';
@@ -56,7 +57,13 @@ function NotFound({ path }: { path: string }): ReactElement {
   );
 }
 
-export function App({ locale }: { locale: Locale }): ReactElement {
+/**
+ * `locale` is the value the query string carried at load; the host may change
+ * it later without reloading this document (byte5ai/omadia#1480), and the
+ * catalogue follows. The router keeps its hash route across the change.
+ */
+export function App({ locale: initialLocale }: { locale: Locale }): ReactElement {
+  const locale = useHostLocale(initialLocale);
   return (
     <I18nProvider locale={locale}>
       <RouterProvider>
