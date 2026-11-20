@@ -202,10 +202,14 @@ sees the request), the body size cap, the `max_tokens` clamp, the W4 cost
 budget, usage recording, 429 pass-through, 5xx/connect retry-once before the
 first byte, streaming and mid-stream truncation metering.
 
-**One protection changed shape:** response redaction. The proxy can no longer
-scrub the exact key, because it never has it. It redacts the *shape* of an
-Anthropic credential (`sk-ant-` + 20 or more `[A-Za-z0-9_-]`) from every
-response byte instead, streamed or buffered (`llmProxyRedaction.ts`).
+**One protection moved:** response redaction. The plugin never has the key,
+so the exact-key scrub now happens in the KERNEL: `modelPassthrough@1` drops
+auth-like response headers and scrubs the instance key from the response
+body, across stream chunks too (byte5ai/omadia#2140). The proxy additionally
+redacts the *shape* of an Anthropic credential (`sk-ant-` + 20 or more
+`[A-Za-z0-9_-]`) from every response byte, streamed or buffered, as defence
+in depth (`llmProxyRedaction.ts`), and still strips auth-like response
+headers itself.
 
 Gateway refusals are answered at once, as JSON, never retried
 (`host/modelGateway.ts`): call budget or daily operator budget used up → 402;

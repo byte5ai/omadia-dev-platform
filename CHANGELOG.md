@@ -28,9 +28,10 @@ byte5ai/omadia#2042.
 - The LLM proxy keeps every protection it had (job-token auth, terminal and
   budget pre-gates, model allowlist, request-header allowlist, body cap,
   `max_tokens` clamp, cost budget, usage recording, 429 pass-through, retry
-  once before the first byte, streaming and truncation metering). Response
-  redaction now matches the shape of an Anthropic credential instead of the
-  exact key, which the plugin no longer has.
+  once before the first byte, streaming and truncation metering). The kernel
+  scrubs the exact instance key (and auth-like headers) from the response;
+  the proxy additionally redacts credential-shaped strings (`sk-ant-…`) as
+  defence in depth, since the plugin no longer has the key.
 - Gateway refusals answer the runner at once with a named JSON error: 402
   `dev.model_calls_exhausted` / `dev.operator_budget_exhausted`, 410
   `dev.model_call_refused.cancelled|deadline`, 403
