@@ -216,7 +216,7 @@ Gateway refusals are answered at once, as JSON, never retried
 cancelled or past its deadline → 410; kill switch → 403; no Anthropic
 credentials on the instance → 503 `model_passthrough.no_credentials`.
 
-**Cost:** on a kernel without the two services (older than plugin-api 1.76.0,
+**Cost:** on a kernel without the two services (older than plugin-api 1.77.0,
 or the plugin not installed as a system module) the plugin still activates, but
 the proxy answers every model call 503 `devplatform.model_gateway_unavailable`.
 There is deliberately no fallback to a direct provider call.

@@ -22,7 +22,7 @@ workers, and **nine database tables it migrates itself**.
 
 ## Before you install
 
-- **omadia core with `@omadia/plugin-api` 1.76.0 or newer** — the kernel that
+- **omadia core with `@omadia/plugin-api` 1.77.0 or newer** — the kernel that
   loads the `system-module` kind and publishes the model gateway.
 - **The instance's Anthropic model provider, configured.** The Claude CLI in a
   job's runner talks to this plugin's LLM proxy; the proxy forwards each call

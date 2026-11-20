@@ -100,7 +100,7 @@ docs/                  operator guide, secrets, supply chain, acceptance runs
 the file the hub reads, and `identity.kind` is **`system-module`**: omadia
 infrastructure, not a capability an agent calls. Its model access goes through
 the kernel's model gateway (`operatorJobs@1` + `modelPassthrough@1`, plugin-api
-1.76.0), so it holds no model-provider key — the instance's Anthropic model
+1.77.0), so it holds no model-provider key — the instance's Anthropic model
 provider must be configured. See `packages/plugin/SEAMS.md` S10.
 
 ## Building it

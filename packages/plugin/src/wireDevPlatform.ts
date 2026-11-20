@@ -406,7 +406,7 @@ export function assembleDevPlatform(deps: WireDevPlatformDeps): WiredDevPlatform
   if (!operatorJobs || !deps.modelGateway?.modelPassthrough) {
     log(
       "[dev-platform] the kernel's model gateway (operatorJobs@1 + modelPassthrough@1) is not available — " +
-        'the LLM proxy answers 503 and no api_key job can reach a model. It needs plugin-api 1.76.0 and ' +
+        'the LLM proxy answers 503 and no api_key job can reach a model. It needs plugin-api 1.77.0 and ' +
         'this plugin installed as a system module.',
     );
   }

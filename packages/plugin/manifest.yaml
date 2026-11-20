@@ -71,7 +71,7 @@ identity:
     - "github"
 
 compat:
-  # `>=1.76.0` names @omadia/plugin-api 1.76.0 (byte5ai/omadia#2140, spec 2042
+  # `>=1.77.0` names @omadia/plugin-api 1.77.0 (byte5ai/omadia#2140, spec 2042
   # S3a): the kernel that knows the `system-module` kind and publishes the
   # model gateway (`operatorJobs@1`, `modelPassthrough@1`) this plugin's LLM
   # proxy forwards through. An older kernel does not load the kind, and it has
@@ -79,12 +79,12 @@ compat:
   #
   # Everything the earlier floor (1.5.0) named — public paths, route auth
   # modes, `permissions.sql` with its handoff, `optional_requires` +
-  # `getOptional`, `ctx.sql.seedLedger` — is contained in 1.76.0.
+  # `getOptional`, `ctx.sql.seedLedger` — is contained in 1.77.0.
   #
   # NOTE, so nobody mistakes this for a gate: core does not semver-compare it at
   # install. It is a declaration to the operator, so it must be honest rather
   # than permissive.
-  core: ">=1.76.0 <2.0"
+  core: ">=1.77.0 <2.0"
   node: ">=20"
 
 lifecycle:
@@ -247,7 +247,7 @@ setup:
 
       ### Before you install
 
-      **omadia core with plugin-api 1.76.0 or newer.** This is a *system
+      **omadia core with plugin-api 1.77.0 or newer.** This is a *system
       module*: its model access goes through the kernel's model gateway
       (`operatorJobs@1` + `modelPassthrough@1`), and it holds no model-provider
       key. An older core does not load the kind and has no gateway.
@@ -341,7 +341,7 @@ setup:
       | `githubAppJwt@1` | The plugin falls back to a local RS256 signer. Functionally equivalent; the App private key is held by the plugin rather than by core. |
       | `usageTelemetry@1` | No rows in the operator cost dashboard's ledger. **Per-job budgets are unaffected** — they meter this plugin's own tables and keep enforcing. |
       | `conductorRoles@1` | Repositories whose approver is a ROLE rather than a person cannot have their gates approved. Fail-CLOSED — the safe direction, but a regression you should know about. Assign named approvers instead. |
-      | `operatorJobs@1` + `modelPassthrough@1` | The kernel's model gateway. Without it **no job can reach a model**: the LLM proxy answers 503 `devplatform.model_gateway_unavailable`. The kernel publishes both to system modules from plugin-api 1.76.0. |
+      | `operatorJobs@1` + `modelPassthrough@1` | The kernel's model gateway. Without it **no job can reach a model**: the LLM proxy answers 503 `devplatform.model_gateway_unavailable`. The kernel publishes both to system modules from plugin-api 1.77.0. |
 
       Only `graphPool@1` is mandatory. If core cannot provide it the install is
       refused with `install.missing_capability` (HTTP 409).
@@ -428,7 +428,7 @@ setup:
 
       ### Vor der Installation
 
-      **omadia Core mit plugin-api 1.76.0 oder neuer.** Das Plugin ist ein
+      **omadia Core mit plugin-api 1.77.0 oder neuer.** Das Plugin ist ein
       *Systemmodul*: Sein Modellzugang läuft über das Modell-Gateway des Kernels
       (`operatorJobs@1` + `modelPassthrough@1`), und es hält keinen Key eines
       Modell-Providers. Älterer Core lädt die Art nicht und hat kein Gateway.
@@ -528,7 +528,7 @@ setup:
       | `githubAppJwt@1` | Rückfall auf einen lokalen RS256-Signer. Funktional gleichwertig; die App-Signaturschlüssel liegen dann beim Plugin statt bei Core. |
       | `usageTelemetry@1` | Keine Zeilen im Kosten-Dashboard. **Budgets pro Job sind nicht betroffen** — sie messen die eigenen Tabellen des Plugins und greifen weiter. |
       | `conductorRoles@1` | Repositories, deren Freigeber eine ROLLE ist, lassen sich nicht mehr freigeben. Fail-CLOSED — die sichere Richtung, aber eine Einschränkung, die du kennen solltest. Trage stattdessen namentliche Freigeber ein. |
-      | `operatorJobs@1` + `modelPassthrough@1` | Das Modell-Gateway des Kernels. Ohne es **erreicht kein Job ein Modell**: Der LLM-Proxy antwortet mit 503 `devplatform.model_gateway_unavailable`. Der Kernel stellt beide ab plugin-api 1.76.0 für Systemmodule bereit. |
+      | `operatorJobs@1` + `modelPassthrough@1` | Das Modell-Gateway des Kernels. Ohne es **erreicht kein Job ein Modell**: Der LLM-Proxy antwortet mit 503 `devplatform.model_gateway_unavailable`. Der Kernel stellt beide ab plugin-api 1.77.0 für Systemmodule bereit. |
 
       Nur `graphPool@1` ist zwingend. Kann Core es nicht bereitstellen, wird die
       Installation mit `install.missing_capability` (HTTP 409) abgelehnt.

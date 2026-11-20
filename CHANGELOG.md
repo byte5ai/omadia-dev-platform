@@ -11,14 +11,14 @@ version.
 
 ## 0.4.0 — unreleased
 
-Needs omadia core with plugin-api 1.76.0 (byte5ai/omadia#2140); published only
+Needs omadia core with plugin-api 1.77.0 (byte5ai/omadia#2140); published only
 after that kernel runs in production. Refs byte5ai/omadia#2053,
 byte5ai/omadia#2042.
 
 ### Changed
 
 - **A system module on the kernel's model gateway.** `identity.kind` is
-  `system-module` (was `extension`), `compat.core` is `>=1.76.0 <2.0`. Its
+  `system-module` (was `extension`), `compat.core` is `>=1.77.0 <2.0`. Its
   model access goes through the kernel's model gateway (`operatorJobs@1` +
   `modelPassthrough@1`, declared under `optional_requires:` because the kernel
   publishes them); **it holds no provider key.** The instance's Anthropic model

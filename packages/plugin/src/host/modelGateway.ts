@@ -13,7 +13,7 @@
  *                      kernel adds the instance's Anthropic credentials and
  *                      admits the call against the job's budget.
  *
- * The types are declared STRUCTURALLY, mirroring `@omadia/plugin-api` 1.76.0
+ * The types are declared STRUCTURALLY, mirroring `@omadia/plugin-api` 1.77.0
  * `modelPassthrough.ts`, for the same reason `DevPlatformPluginContext` is
  * (test/coreApiSurface.test.ts): CI type-checks against core `main`, and an
  * import of a name that has not landed there would break it.

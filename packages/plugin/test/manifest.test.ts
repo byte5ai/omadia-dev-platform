@@ -86,8 +86,8 @@ void describe('manifest', () => {
     assert.equal(scalar(2, 'kind'), 'system-module');
   });
 
-  void it('compat.core names the kernel with the model gateway (plugin-api 1.76.0)', () => {
-    assert.equal(scalar(2, 'core'), '>=1.76.0 <2.0');
+  void it('compat.core names the kernel with the model gateway (plugin-api 1.77.0)', () => {
+    assert.equal(scalar(2, 'core'), '>=1.77.0 <2.0');
   });
 
   void it('holds no model-provider host and no provider-key setting', () => {
