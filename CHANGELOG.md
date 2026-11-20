@@ -9,6 +9,48 @@ project versions the ARTIFACT, not the repository: a release is a ZIP an
 operator can install, so anything that does not change the ZIP does not get a
 version.
 
+## 0.4.0 — unreleased
+
+Needs omadia core with plugin-api 1.76.0 (byte5ai/omadia#2140); published only
+after that kernel runs in production. Refs byte5ai/omadia#2053,
+byte5ai/omadia#2042.
+
+### Changed
+
+- **A system module on the kernel's model gateway.** `identity.kind` is
+  `system-module` (was `extension`), `compat.core` is `>=1.76.0 <2.0`. Its
+  model access goes through the kernel's model gateway (`operatorJobs@1` +
+  `modelPassthrough@1`, declared under `optional_requires:` because the kernel
+  publishes them); **it holds no provider key.** The instance's Anthropic model
+  provider must be configured. Each dev job's model calls run inside one kernel
+  operator job, opened on its first call and ended when the job reaches a
+  terminal status. See `packages/plugin/SEAMS.md` S10.
+- The LLM proxy keeps every protection it had (job-token auth, terminal and
+  budget pre-gates, model allowlist, request-header allowlist, body cap,
+  `max_tokens` clamp, cost budget, usage recording, 429 pass-through, retry
+  once before the first byte, streaming and truncation metering). Response
+  redaction now matches the shape of an Anthropic credential instead of the
+  exact key, which the plugin no longer has.
+- Gateway refusals answer the runner at once with a named JSON error: 402
+  `dev.model_calls_exhausted` / `dev.operator_budget_exhausted`, 410
+  `dev.model_call_refused.cancelled|deadline`, 403
+  `dev.model_call_refused.kill_switch`, 503 `model_passthrough.no_credentials`.
+
+### Added
+
+- Setup field `llm_max_model_calls` (default 2000): the operator job's
+  model-call budget per dev job.
+
+### Removed
+
+- `api.anthropic.com` from `permissions.network.outbound`; the plugin makes no
+  provider call.
+- The vault key `core:dev-platform` / `llm/<provider>/api_key` is no longer read,
+  and the deployment env `DEV_PLATFORM_LLM_PROVIDER` /
+  `DEV_PLATFORM_LLM_UPSTREAM_BASE_URL` is ignored. A kernel without the model
+  gateway gets 503 `devplatform.model_gateway_unavailable` — there is no
+  fallback to a direct provider call.
+
 ## 0.3.7 — 2026-10-28
 
 ### Fixed

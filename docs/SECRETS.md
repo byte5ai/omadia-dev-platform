@@ -96,4 +96,8 @@ to the sidecars, in `docker-compose.dev-platform.yaml`:
 - `DEV_RUNNER_DAEMON_TOKEN` — a comma-separated list so it can be rotated with
   zero downtime. Both ends **accept** every token in the list and **send** the
   first, so a rotation is: prepend the new token, restart, then drop the old one.
-- The LLM provider key the proxy forwards with.
+- **No LLM provider key.** The dev platform is a system module and holds none:
+  the LLM proxy forwards through the kernel's model gateway
+  (`modelPassthrough@1`), which adds the instance's Anthropic credentials. A
+  key left at `core:dev-platform` / `llm/anthropic/api_key` by an older version
+  is no longer read; delete it through your host's secret management.

@@ -1,6 +1,7 @@
 # Seams — everything this package used to get from core
 
-The dev-platform tree reached outside itself in exactly **nine** places. Six were
+The dev-platform tree reached outside itself in exactly **nine** places (S1–S9);
+S10 is the model gateway the plugin moved onto in 0.4.0. Six were
 core modules; three were private core workspace packages. None of them survive as
 an import: a plugin has no module graph into its host.
 
@@ -20,6 +21,7 @@ working is the failure mode this whole extraction has to avoid.
 | S7 | `ConductorRoleStore` (via `index.ts`) | optional `conductorRoles@1`, else fail-closed | **role-principal gates unapprovable** |
 | S8 | `turnContext` (via `index.ts`) | `ctx.services.get('turnContext')` | chat tools unregistered without it |
 | S9 | `@omadia/orchestrator` → `TaskStore` | **not ported** — see "Deliberate non-moves" | none (zero consumers) |
+| S10 | Vault provider key + direct `fetch` to the provider | the kernel's model gateway: `operatorJobs@1` + `modelPassthrough@1` | **no model access on a kernel without it** (503, no fallback) |
 
 ---
 
@@ -170,6 +172,54 @@ offering them: the model keeps trying and the operator reads the refusals as a b
 ## S9 — the generic task store · **NOT PORTED**
 
 See "Deliberate non-moves".
+
+## S10 — model access · **THE KERNEL'S MODEL GATEWAY**
+
+The dev platform is a **system module** (spec 2042 §5.10). Its model access goes
+through the kernel's model gateway; **it holds no model-provider key** and makes
+no provider call itself.
+
+Until 0.3.x the LLM proxy read the provider key from its own vault namespace
+(`core:dev-platform` / `llm/<provider>/api_key`) and called the provider with
+`fetch`. Now:
+
+- **`operatorJobs@1`** opens one kernel OPERATOR JOB per dev job
+  (`llmOperatorJobs.ts`): lazily, on the dev job's first proxied call; cached by
+  dev-job id and reused; `budgetCalls` from `llm_max_model_calls` (default
+  2000), `deadlineMs` = the dev job's remaining wall clock plus a minute,
+  `effects: ['pull_request']`, `startedBy` = the dev job's requester. It is
+  ended by the finalize choke point's revoker registry — every terminal path —
+  and by the proxy when it sees a terminal job; a dev job ended once can never
+  open another. Plugin deactivation ends every open one.
+- **`modelPassthrough@1`** forwards each `POST /v1/messages` inside that job.
+  The kernel adds the instance's Anthropic credentials and admits the call
+  against the job's budget, deadline, cancel and kill switch.
+
+Every protection the proxy had stays where it was: job-token auth, the
+terminal and `budget_exceeded` pre-gates, the model allowlist on the
+canonicalised body, the request-header allowlist (applied before the kernel
+sees the request), the body size cap, the `max_tokens` clamp, the W4 cost
+budget, usage recording, 429 pass-through, 5xx/connect retry-once before the
+first byte, streaming and mid-stream truncation metering.
+
+**One protection changed shape:** response redaction. The proxy can no longer
+scrub the exact key, because it never has it. It redacts the *shape* of an
+Anthropic credential (`sk-ant-` + 20 or more `[A-Za-z0-9_-]`) from every
+response byte instead, streamed or buffered (`llmProxyRedaction.ts`).
+
+Gateway refusals are answered at once, as JSON, never retried
+(`host/modelGateway.ts`): call budget or daily operator budget used up → 402;
+cancelled or past its deadline → 410; kill switch → 403; no Anthropic
+credentials on the instance → 503 `model_passthrough.no_credentials`.
+
+**Cost:** on a kernel without the two services (older than plugin-api 1.76.0,
+or the plugin not installed as a system module) the plugin still activates, but
+the proxy answers every model call 503 `devplatform.model_gateway_unavailable`.
+There is deliberately no fallback to a direct provider call.
+
+The service types are declared structurally in `host/modelGateway.ts`, like
+`DevPlatformPluginContext`: CI type-checks against core `main`, and the
+kernel's error classes are matched by `name`, never by `instanceof`.
 
 ---
 
