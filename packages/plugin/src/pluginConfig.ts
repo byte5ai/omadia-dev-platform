@@ -56,6 +56,7 @@ export const SETUP_FIELD_KEYS = [
   'heartbeat_timeout_ms',
   'llm_allowed_models',
   'llm_default_budget_usd',
+  'llm_max_model_calls',
   'llm_max_output_tokens',
   'event_retention_days',
   'audit_retention_days',
@@ -85,6 +86,7 @@ const DEFAULTS = {
   workspaceDir: '/tmp/omadia-dev-platform',
   defaultBudgetCostUsd: 5,
   maxOutputTokens: 8192,
+  maxModelCallsPerJob: 2000,
   eventRetentionDays: 30,
   auditRetentionDays: 365,
   maxEventsPerJob: 5000,
@@ -154,11 +156,10 @@ export function buildDevPlatformConfig(
   if (refusals.length > 0) throw new DevPlatformActivationRefused(refusals);
 
   const llm: DevPlatformLlmConfig = {
-    provider: env['DEV_PLATFORM_LLM_PROVIDER'],
-    upstreamBaseUrl: env['DEV_PLATFORM_LLM_UPSTREAM_BASE_URL'],
     allowedModels: csvList(config.get('llm_allowed_models')),
     defaultBudgetCostUsd: int(config.get('llm_default_budget_usd')) ?? DEFAULTS.defaultBudgetCostUsd,
     maxOutputTokens: int(config.get('llm_max_output_tokens')) ?? DEFAULTS.maxOutputTokens,
+    maxModelCallsPerJob: int(config.get('llm_max_model_calls')) ?? DEFAULTS.maxModelCallsPerJob,
   };
 
   // Deployment facts (group 2) + platform-injected env (group 1). `FLY_APP_NAME`

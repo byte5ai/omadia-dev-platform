@@ -538,7 +538,7 @@ void describe('C9 host contracts', () => {
     const handle = await activate(ctx);
     await handle.close();
 
-    const optional = ['githubAppJwt', 'usageTelemetry', 'conductorRoles', 'turnContext'];
+    const optional = ['githubAppJwt', 'usageTelemetry', 'conductorRoles', 'turnContext', 'operatorJobs', 'modelPassthrough'];
     for (const name of optional) {
       const lookups = rec.optionalLookups.filter((l) => l.name === name);
       assert.ok(lookups.length > 0, `${name} was never resolved`);
@@ -577,7 +577,7 @@ void describe('C9 host contracts', () => {
     const handle = await activate(ctx);
     await handle.close();
 
-    for (const name of ['githubAppJwt', 'usageTelemetry', 'conductorRoles', 'turnContext']) {
+    for (const name of ['githubAppJwt', 'usageTelemetry', 'conductorRoles', 'turnContext', 'operatorJobs', 'modelPassthrough']) {
       assert.ok(
         DECLARED_CAPABILITIES.has(name),
         `manifest.yaml declares neither requires: nor optional_requires: '${name}'`,

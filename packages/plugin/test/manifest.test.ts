@@ -80,9 +80,27 @@ void describe('manifest', () => {
     );
   });
 
-  void it('kind is one the plugin runtime will actually activate', () => {
-    // `toolPluginRuntime.ts:163-168` activates tool/extension/integration only.
-    assert.ok(['tool', 'extension', 'integration'].includes(scalar(2, 'kind') ?? ''));
+  void it('kind is system-module: the only kind the kernel gives its model gateway', () => {
+    // Spec 2042 §5.10: `operatorJobs@1` + `modelPassthrough@1` are given only to
+    // system modules, and they are this plugin's ONLY way to a model.
+    assert.equal(scalar(2, 'kind'), 'system-module');
+  });
+
+  void it('compat.core names the kernel with the model gateway (plugin-api 1.76.0)', () => {
+    assert.equal(scalar(2, 'core'), '>=1.76.0 <2.0');
+  });
+
+  void it('holds no model-provider host and no provider-key setting', () => {
+    // The kernel makes the provider call. A provider host here would be an
+    // egress grant nothing should use; a key field would be a key this plugin
+    // must not hold.
+    const outbound = /^\s{4}outbound:\s*\n((?:\s{6}-\s*.+\n)+)/m.exec(manifest)?.[1] ?? '';
+    assert.match(outbound, /api\.github\.com/, 'the outbound list was not found');
+    for (const host of ['api.anthropic.com', 'api.openai.com']) {
+      assert.ok(!outbound.includes(host), `${host} must not be in permissions.network.outbound`);
+    }
+    assert.doesNotMatch(manifest, /llm\/[a-z]+\/api_key/);
+    assert.doesNotMatch(manifest, /key:\s*["'][a-z_]*api_key["']/);
   });
 
   void it('permissions.sql.ledger is a name THIS plugin may own', () => {
@@ -228,12 +246,20 @@ void describe('manifest', () => {
     const declared = new Set(
       [...list('requires'), ...list('optional_requires')].map((r) => r.split('@')[0]),
     );
-    for (const cap of ['graphPool', 'turnContext', 'githubAppJwt', 'usageTelemetry', 'conductorRoles']) {
+    for (const cap of [
+      'graphPool',
+      'turnContext',
+      'githubAppJwt',
+      'usageTelemetry',
+      'conductorRoles',
+      'operatorJobs',
+      'modelPassthrough',
+    ]) {
       assert.ok(declared.has(cap), `manifest declares neither requires: nor optional_requires: '${cap}@1'`);
     }
   });
 
-  void it('only graphPool is MANDATORY — the other four are optional_requires', () => {
+  void it('only graphPool is MANDATORY — the other six are optional_requires', () => {
     // The split is load-bearing, and in the direction that is easy to get
     // wrong. `capabilityResolver.ts` and the install gate read `requires:` and
     // nothing else (#795), so a name promoted back into `requires:` makes this
@@ -247,6 +273,10 @@ void describe('manifest', () => {
       'githubAppJwt@1',
       'usageTelemetry@1',
       'conductorRoles@1',
+      // Kernel-published (spec 2042 §5.10) — a `requires:` entry would fail the
+      // install gate, which only indexes other plugins' `provides:`.
+      'operatorJobs@1',
+      'modelPassthrough@1',
     ]);
   });
 

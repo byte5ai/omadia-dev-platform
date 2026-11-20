@@ -13,7 +13,8 @@
  * | `if (config.devPlatform.enabled)`| the install IS the switch                             |
  * | `graphPool` from the registry    | `ctx.services.get('graphPool')`, gated by `permissions.sql` |
  * | `secretVault`                    | `secretVaultFromContext(ctx.secrets)`                 |
- * | 43 `DEV_*` env keys              | 21 `setup.fields` + deployment env (`pluginConfig.ts`) |
+ * | Vault provider key + `fetch`     | the kernel's model gateway: `operatorJobs@1` + `modelPassthrough@1` |
+ * | 43 `DEV_*` env keys              | 22 `setup.fields` + deployment env (`pluginConfig.ts`) |
  * | boot refusals in `loadConfig()`  | activation refusals — blast radius is one plugin      |
  * | core's migrator, slots 0022-0030 | `ctx.sql.runMigrations()` on the plugin's own ledger   |
  * | `app.use(prefix, requireAuth, r)`| `ctx.routes.register(prefix, r, {auth, body})`         |
@@ -55,6 +56,12 @@ import { secretVaultFromContext } from './host/vault.js';
 import { SEED_LEDGER_ENTRIES } from './ledgerHandoff.js';
 import { installAppJwtMinter, type GithubAppJwtMinter } from './host/githubAppJwt.js';
 import { installUsageRecorder, droppedUsageRows, type UsageRecorder } from './host/usageTelemetry.js';
+import {
+  MODEL_PASSTHROUGH_SERVICE_NAME,
+  OPERATOR_JOBS_SERVICE_NAME,
+  type ModelPassthroughService,
+  type OperatorJobsService,
+} from './host/modelGateway.js';
 
 // Side-effect import: declares `Request.session` for the whole compilation, the
 // way core's `auth/requireAuth.ts` did. See `host/expressSession.ts`.
@@ -323,6 +330,17 @@ async function activateInner(
     );
   }
 
+  // Spec 2042 §5.10: the kernel's model gateway. The LLM proxy reaches models
+  // through these two and nothing else — this plugin holds no provider key. The
+  // kernel gives them only to system modules and adds the instance's Anthropic
+  // credentials itself. Absent (older kernel, or not installed as a system
+  // module) ⇒ the plugin still activates, and the proxy answers 503 by name;
+  // the assembly logs the cause.
+  const modelGateway = {
+    operatorJobs: optionalCapability<OperatorJobsService>(ctx, OPERATOR_JOBS_SERVICE_NAME, log),
+    modelPassthrough: optionalCapability<ModelPassthroughService>(ctx, MODEL_PASSTHROUGH_SERVICE_NAME, log),
+  };
+
   {
     // ── 3. Migrations ──────────────────────────────────────────────────────
     // Nine files, slots 0022-0030, filenames preserved, under an advisory lock
@@ -394,6 +412,7 @@ async function activateInner(
       vault,
       config,
       shimEntry: resolveShimEntry(),
+      modelGateway,
       ...(roleHolders ? { resolveRoleHolders: (key: string) => roleHolders.resolve(key) } : {}),
       log,
     });

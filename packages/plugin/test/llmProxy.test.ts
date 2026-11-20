@@ -7,6 +7,8 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import type { Express } from 'express';
 
+import type { OperatorJobsService } from '../src/host/modelGateway.js';
+import { createDevJobOperatorJobs, type DevJobOperatorJobs } from '../src/llmOperatorJobs.js';
 import {
   createLlmProxyRouter,
   type LlmModelPolicy,
@@ -16,19 +18,28 @@ import {
 } from '../src/llmProxy.js';
 import { createDevRunnerRouter, type DevRunnerRouterDeps } from '../src/routes/devRunnerApi.js';
 import type { DevJobStatus } from '../src/types.js';
+import {
+  INSTANCE_KEY,
+  fakeModelGateway as fakeGateway,
+  kernelError,
+  type FetchCall,
+  type OpenedJob,
+} from './_helpers/fakeModelGateway.js';
 
 /**
- * Epic #470 W1 — the LLM proxy (spec §6b). The spec names no unit test for this
- * unit; this file covers every acceptance criterion: mount on the phone-home
- * router + terminal 410, the `GET /` probe, job-token→provider-key swap with
- * header stripping, the model allowlist 403, verbatim SSE passthrough with usage
- * metering into dev_jobs + the ledger, 429 Retry-After passthrough, 5xx
- * single-retry, and the no-retry-after-tokens-emitted rule.
+ * Epic #470 W1 — the LLM proxy (spec §6b), on the kernel's model gateway (spec
+ * 2042 §5.10). Covers: mount on the phone-home router + terminal 410, the
+ * `GET /` probe, job-token auth with header stripping (the plugin never holds
+ * or forwards a key — the fake kernel below adds the instance's), the model
+ * allowlist 403, verbatim SSE passthrough with usage metering into dev_jobs +
+ * the ledger, 429 Retry-After passthrough, 5xx single-retry, the
+ * no-retry-after-tokens-emitted rule, credential redaction, and the gateway:
+ * one operator job per dev job, ended on a terminal job, refusals mapped, 503
+ * without the services.
  */
 
 const VALID = 'djr_valid-token';
-const REAL_KEY = 'sk-ant-REAL-PROVIDER-KEY';
-const CLIENT_KEY = 'sk-ant-CLIENT-SUPPLIED-DO-NOT-FORWARD';
+const CLIENT_KEY = 'sk-ant-api03-CLIENTSUPPLIEDDONOTFORWARD0123';
 
 // --- SSE fixtures (Anthropic Messages streaming shape) ----------------------
 const SSE_START =
@@ -53,13 +64,6 @@ function deferred<T>(): Deferred<T> {
     resolve = r;
   });
   return { promise, resolve };
-}
-
-/** A recorded upstream call, for header/body/count assertions. */
-interface FetchCall {
-  url: string;
-  headers: Record<string, string>;
-  body: string;
 }
 
 function sseResponse(text: string, opts: { truncateAfterBytes?: number } = {}): Response {
@@ -92,44 +96,52 @@ interface Fixture {
   server: Server;
   base: string; // …/api/v1/dev-runner
   calls: FetchCall[];
+  opened: OpenedJob[];
+  operatorJobs: DevJobOperatorJobs;
   usageRows: LlmProxyUsageRecord[];
   jobUsage: Array<{ jobId: string; tokensIn: number; tokensOut: number }>;
   metered: Deferred<void>;
   close(): Promise<void>;
 }
 
+const RUNNING_JOB: LlmProxyJob = {
+  id: 'job-1',
+  status: 'running',
+  agentKind: 'claude-cli',
+  createdBy: 'op@example.com',
+  startedAt: new Date().toISOString(),
+};
+
 function makeFixture(opts: {
   job?: LlmProxyJob | null;
+  /** Extra bearer → job mappings (several dev jobs behind one proxy). */
+  jobs?: Record<string, LlmProxyJob>;
   policy?: LlmModelPolicy | null;
-  providerKey?: string | undefined;
   upstream: (call: FetchCall, attempt: number) => Response | Promise<Response> | never;
+  /** Replace the fake kernel's `open` (e.g. a refusing one). */
+  open?: OperatorJobsService['open'];
+  /** Simulate a kernel without the gateway. */
+  withoutGateway?: 'both' | 'operatorJobs' | 'modelPassthrough';
   proxyOverrides?: Partial<LlmProxyDeps>;
 }): Promise<Fixture> {
-  const calls: FetchCall[] = [];
   const usageRows: LlmProxyUsageRecord[] = [];
   const jobUsage: Fixture['jobUsage'] = [];
   const metered = deferred<void>();
 
-  const job: LlmProxyJob | null =
-    opts.job === undefined ? { id: 'job-1', status: 'running', agentKind: 'claude-cli' } : opts.job;
+  const job: LlmProxyJob | null = opts.job === undefined ? RUNNING_JOB : opts.job;
   const policy: LlmModelPolicy | null =
-    opts.policy === undefined
-      ? { provider: 'anthropic', upstreamBaseUrl: 'https://upstream.test', allowedModels: ['claude-opus-4-8'] }
-      : opts.policy;
+    opts.policy === undefined ? { allowedModels: ['claude-opus-4-8'] } : opts.policy;
 
-  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const headers = init?.headers as Record<string, string>;
-    const body = init?.body instanceof Buffer ? init.body.toString('utf8') : String(init?.body ?? '');
-    const call: FetchCall = { url: String(url), headers: { ...headers }, body };
-    const attempt = calls.length;
-    calls.push(call);
-    return opts.upstream(call, attempt);
-  }) as unknown as typeof fetch;
+  const gateway = fakeGateway(opts.upstream);
+  const service: OperatorJobsService = opts.open ? { open: opts.open } : gateway.operatorJobs;
+  const operatorJobs = createDevJobOperatorJobs({ service, wallClockMs: 45 * 60_000 });
+  const without = opts.withoutGateway;
 
   const proxyDeps: LlmProxyDeps = {
-    resolveJobByToken: async (t) => (t === VALID ? job : null),
+    resolveJobByToken: async (t) => (t === VALID ? job : (opts.jobs?.[t] ?? null)),
     resolvePolicy: async () => policy,
-    resolveProviderKey: async () => (opts.providerKey === undefined ? REAL_KEY : opts.providerKey),
+    ...(without === 'both' || without === 'operatorJobs' ? {} : { operatorJobs }),
+    ...(without === 'both' || without === 'modelPassthrough' ? {} : { modelPassthrough: gateway.modelPassthrough }),
     addJobUsage: async (jobId, tokensIn, tokensOut) => {
       jobUsage.push({ jobId, tokensIn, tokensOut });
     },
@@ -137,7 +149,6 @@ function makeFixture(opts: {
       usageRows.push(row);
       metered.resolve();
     },
-    fetchImpl,
     ...opts.proxyOverrides,
   };
 
@@ -166,7 +177,9 @@ function makeFixture(opts: {
       resolve({
         server,
         base: `http://127.0.0.1:${String(port)}/api/v1/dev-runner`,
-        calls,
+        calls: gateway.calls,
+        opened: gateway.opened,
+        operatorJobs,
         usageRows,
         jobUsage,
         metered,
@@ -247,29 +260,32 @@ describe('llmProxy — mount + auth gate', () => {
     assert.equal(res.status, 410);
     assert.equal(((await res.json()) as { code: string }).code, 'devplatform.job_terminal');
     assert.equal(fx.calls.length, 0);
+    assert.equal(fx.opened.length, 0, 'a terminal job never opens an operator job');
   });
 });
 
-describe('llmProxy — key swap + header stripping', () => {
+describe('llmProxy — no key in the plugin + header stripping', () => {
   let fx: Fixture;
   afterEach(async () => {
     if (fx) await fx.close();
   });
 
-  it('replaces the client bearer with the Vault provider key and strips client x-api-key/authorization', async () => {
+  it('hands the kernel no credential at all: client x-api-key/authorization and the job bearer are stripped', async () => {
     fx = await makeFixture({ upstream: () => sseResponse(FULL_SSE) });
     const res = await post(fx.base, OK_BODY, { ...authed, 'x-api-key': CLIENT_KEY });
     await res.text();
 
     assert.equal(fx.calls.length, 1);
     const fwd = fx.calls[0]!.headers;
-    // provider key attached; no client key survives anywhere.
-    assert.equal(fwd['x-api-key'], REAL_KEY);
     const serialized = JSON.stringify(fwd);
     assert.ok(!serialized.includes(CLIENT_KEY), 'client x-api-key must not be forwarded');
     assert.ok(!serialized.includes(VALID), 'job bearer must not be forwarded');
-    // no Authorization header reaches upstream.
-    assert.ok(!Object.keys(fwd).some((k) => k.toLowerCase() === 'authorization'));
+    assert.ok(!serialized.includes('sk-ant-'), 'the proxy forwards no key of any kind');
+    assert.ok(!Object.keys(fwd).some((k) => ['authorization', 'x-api-key'].includes(k.toLowerCase())));
+    // The KERNEL adds the instance's key; the client's never reaches upstream.
+    assert.equal(fx.calls[0]!.upstreamHeaders['x-api-key'], INSTANCE_KEY);
+    assert.equal(fwd['anthropic-version'], '2023-06-01', 'a default anthropic-version is set');
+    assert.equal(fwd['content-type'], 'application/json');
   });
 
   it('preserves the ?beta=true query when forwarding', async () => {
@@ -279,14 +295,13 @@ describe('llmProxy — key swap + header stripping', () => {
     assert.ok(fx.calls[0]!.url.endsWith('/v1/messages?beta=true'), fx.calls[0]!.url);
   });
 
-  it('500 when no provider key is configured; nothing is forwarded upstream', async () => {
-    fx = await makeFixture({
-      proxyOverrides: { resolveProviderKey: async () => undefined },
-      upstream: () => sseResponse(FULL_SSE),
-    });
+  it('500 when no model policy is configured; nothing is forwarded', async () => {
+    fx = await makeFixture({ policy: null, upstream: () => sseResponse(FULL_SSE) });
     const res = await post(fx.base, OK_BODY, authed);
     assert.equal(res.status, 500);
+    assert.equal(((await res.json()) as { code: string }).code, 'devplatform.no_provider');
     assert.equal(fx.calls.length, 0);
+    assert.equal(fx.opened.length, 0);
   });
 });
 
@@ -428,9 +443,10 @@ describe('llmProxy — request header allowlist (review S-finding)', () => {
     for (const banned of ['cookie', 'x-forwarded-for', 'proxy-authorization', 'te']) {
       assert.ok(!keys.includes(banned), `${banned} must not reach upstream`);
     }
-    // the server key is attached, allowlisted client headers survive.
-    assert.equal(fwd['x-api-key'], REAL_KEY);
+    // allowlisted client headers survive; the key is the kernel's to add.
+    assert.ok(!keys.includes('x-api-key'), 'the proxy attaches no key');
     assert.ok(keys.includes('anthropic-beta'), 'allowlisted anthropic-beta is forwarded');
+    assert.ok(keys.includes('accept'), 'allowlisted accept is forwarded');
     assert.ok(!JSON.stringify(fwd).includes('secret'), 'no cookie/proxy secret is leaked upstream');
   });
 });
@@ -531,7 +547,7 @@ describe('llmProxy — response redaction (review S-finding)', () => {
       upstream: () =>
         new Response(FULL_SSE, {
           status: 200,
-          headers: { 'content-type': 'text/event-stream', 'x-api-key': REAL_KEY },
+          headers: { 'content-type': 'text/event-stream', 'x-api-key': INSTANCE_KEY },
         }),
     });
     const res = await post(fx.base, OK_BODY, authed);
@@ -539,10 +555,10 @@ describe('llmProxy — response redaction (review S-finding)', () => {
     assert.equal(res.headers.get('x-api-key'), null, 'the provider key is never handed back');
   });
 
-  it('redacts the provider key from a non-stream error body', async () => {
+  it('redacts the instance key from a non-stream error body', async () => {
     fx = await makeFixture({
       upstream: () =>
-        new Response(JSON.stringify({ error: `invalid x-api-key: ${REAL_KEY}` }), {
+        new Response(JSON.stringify({ error: `invalid x-api-key: ${INSTANCE_KEY}` }), {
           status: 400,
           headers: { 'content-type': 'application/json' },
         }),
@@ -550,14 +566,25 @@ describe('llmProxy — response redaction (review S-finding)', () => {
     const res = await post(fx.base, OK_BODY, authed);
     assert.equal(res.status, 400);
     const text = await res.text();
-    assert.ok(!text.includes(REAL_KEY), 'the provider key must not leak in an echoed error body');
+    assert.ok(!text.includes(INSTANCE_KEY), 'the instance key must not leak in an echoed error body');
     assert.ok(text.includes('[REDACTED]'));
   });
 
-  it('redacts the provider key from a STREAMED SSE error split across two chunks', async () => {
+  it('redacts a credential echoed into a SUCCESS stream, and leaves prose about the prefix alone', async () => {
+    const body = `${SSE_START}data: {"text":"key ${INSTANCE_KEY} and the pattern sk-ant-[a-z]+"}\n\n${SSE_STOP}`;
+    fx = await makeFixture({ upstream: () => sseResponse(body) });
+    const res = await post(fx.base, OK_BODY, authed);
+    const text = await res.text();
+    assert.ok(!text.includes(INSTANCE_KEY));
+    assert.ok(text.includes('key [REDACTED] and'));
+    assert.ok(text.includes('sk-ant-[a-z]+'), 'a short prefix mention is not a credential');
+  });
+
+  it('redacts the instance key from a STREAMED SSE error split across two chunks', async () => {
     // The key straddles the chunk boundary: neither half alone contains it, so a
     // naive per-chunk scan would miss it. The rolling redactor must still catch it.
-    const boundary = REAL_KEY.indexOf('PROVIDER');
+    const REAL_KEY = INSTANCE_KEY;
+    const boundary = REAL_KEY.indexOf('KEY0123');
     const part1 = `event: error\ndata: {"error":"upstream rejected key ${REAL_KEY.slice(0, boundary)}`;
     const part2 = `${REAL_KEY.slice(boundary)} — retry"}\n\n`;
     // sanity: only the concatenation holds the full key.
@@ -638,24 +665,16 @@ describe('llmProxy — survives a global express.json() ahead of the router (ind
   });
 
   it('parses the body correctly when a global express.json() precedes the router', async () => {
-    const calls: FetchCall[] = [];
-    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-      const body = init?.body instanceof Buffer ? init.body.toString('utf8') : String(init?.body ?? '');
-      calls.push({ url: String(url), headers: { ...(init?.headers as Record<string, string>) }, body });
-      return sseResponse(FULL_SSE);
-    }) as unknown as typeof fetch;
+    const gateway = fakeGateway(() => sseResponse(FULL_SSE));
+    const calls = gateway.calls;
 
     const proxyDeps: LlmProxyDeps = {
       resolveJobByToken: async (t) => (t === VALID ? { id: 'job-1', status: 'running', agentKind: 'claude-cli' } : null),
-      resolvePolicy: async () => ({
-        provider: 'anthropic',
-        upstreamBaseUrl: 'https://upstream.test',
-        allowedModels: ['claude-opus-4-8'],
-      }),
-      resolveProviderKey: async () => REAL_KEY,
+      resolvePolicy: async () => ({ allowedModels: ['claude-opus-4-8'] }),
+      operatorJobs: createDevJobOperatorJobs({ service: gateway.operatorJobs, wallClockMs: 60_000 }),
+      modelPassthrough: gateway.modelPassthrough,
       addJobUsage: async () => {},
       recordUsage: () => {},
-      fetchImpl,
     };
     const runnerDeps: DevRunnerRouterDeps = {
       store: {
@@ -731,3 +750,229 @@ describe('llmProxy — survives a global express.json() ahead of the router (ind
     assert.equal(json.echoed.hello, 'world');
   });
 });
+
+describe('llmProxy — the kernel operator job per dev job (spec 2042 §5.10)', () => {
+  let fx: Fixture;
+  afterEach(async () => {
+    if (fx) await fx.close();
+  });
+
+  it('opens ONE operator job on the first call and reuses it for every later call', async () => {
+    fx = await makeFixture({ upstream: () => sseResponse(FULL_SSE) });
+    for (let i = 0; i < 3; i++) await (await post(fx.base, OK_BODY, authed)).text();
+
+    assert.equal(fx.opened.length, 1, 'one operator job per dev job');
+    assert.equal(fx.calls.length, 3);
+    const job = fx.opened[0]!.job;
+    assert.ok(fx.calls.every((c) => c.job === job), 'every call runs inside the same operator job');
+    const input = fx.opened[0]!.input;
+    assert.equal(input.kind, 'dev_job');
+    assert.equal(input.startedBy, 'op@example.com', "the dev job's requester starts the operator job");
+    assert.equal(input.budgetCalls, 2000, 'default model-call budget');
+    assert.deepEqual(input.effects, ['pull_request']);
+    // Remaining wall clock (45 min, the job just started) plus the grace.
+    assert.ok(input.deadlineMs > 44 * 60_000 && input.deadlineMs <= 46 * 60_000, String(input.deadlineMs));
+  });
+
+  it('concurrent first calls of one dev job still open only one operator job', async () => {
+    fx = await makeFixture({ upstream: () => sseResponse(FULL_SSE) });
+    const responses = await Promise.all([1, 2, 3].map(() => post(fx.base, OK_BODY, authed)));
+    await Promise.all(responses.map((r) => r.text()));
+    assert.equal(fx.opened.length, 1);
+    assert.equal(fx.calls.length, 3);
+  });
+
+  it('opens a separate operator job for each dev job', async () => {
+    fx = await makeFixture({
+      jobs: { djr_other: { id: 'job-2', status: 'running', agentKind: 'claude-cli' } },
+      upstream: () => sseResponse(FULL_SSE),
+    });
+    await (await post(fx.base, OK_BODY, authed)).text();
+    await (await post(fx.base, OK_BODY, { authorization: 'Bearer djr_other' })).text();
+    assert.equal(fx.opened.length, 2);
+    assert.notEqual(fx.calls[0]!.job, fx.calls[1]!.job);
+    assert.equal(fx.opened[1]!.input.startedBy, undefined, 'no requester known ⇒ none claimed');
+  });
+
+  it('ends the operator job when the proxy sees the dev job terminal, and never reopens it', async () => {
+    let status: DevJobStatus = 'running';
+    fx = await makeFixture({
+      upstream: () => sseResponse(FULL_SSE),
+      proxyOverrides: {
+        resolveJobByToken: async (t) => (t === VALID ? { ...RUNNING_JOB, status } : null),
+      },
+    });
+    await (await post(fx.base, OK_BODY, authed)).text();
+    assert.equal(fx.opened.length, 1);
+
+    status = 'budget_exceeded';
+    const res = await post(fx.base, OK_BODY, authed);
+    assert.equal(res.status, 402);
+    await res.text();
+    await waitFor(() => fx.opened[0]!.ended.length === 1);
+    assert.deepEqual(fx.opened[0]!.ended[0], { failed: true, message: 'dev job budget_exceeded' });
+    assert.equal(fx.operatorJobs.openCount, 0);
+
+    // A request that raced the finalize (still resolved as running) must not
+    // open a fresh operator job for a finished dev job.
+    status = 'running';
+    const raced = await post(fx.base, OK_BODY, authed);
+    assert.equal(raced.status, 410);
+    assert.equal(((await raced.json()) as { code: string }).code, 'devplatform.job_terminal');
+    assert.equal(fx.opened.length, 1);
+    assert.equal(fx.calls.length, 1);
+  });
+});
+
+describe('llmProxy — gateway refusals answer at once, never retried', () => {
+  let fx: Fixture;
+  afterEach(async () => {
+    if (fx) await fx.close();
+  });
+
+  const cases: Array<{ name: string; err: () => Error; status: number; code: string }> = [
+    {
+      name: 'call budget used up',
+      err: () => kernelError('ModelCallNotCoveredError', 'model call refused: reserved 2 model calls and has used them'),
+      status: 402,
+      code: 'dev.model_calls_exhausted',
+    },
+    {
+      name: 'operator kill switch',
+      err: () => kernelError('ModelCallRefusedError', 'model call refused: stopped by an operator', 'kill_switch'),
+      status: 403,
+      code: 'dev.model_call_refused.kill_switch',
+    },
+    {
+      name: 'operator job cancelled',
+      err: () => kernelError('ModelCallRefusedError', 'model call refused: the operator job was cancelled', 'cancelled'),
+      status: 410,
+      code: 'dev.model_call_refused.cancelled',
+    },
+    {
+      name: 'operator job past its deadline',
+      err: () => kernelError('ModelCallRefusedError', 'model call refused: past its deadline', 'deadline'),
+      status: 410,
+      code: 'dev.model_call_refused.deadline',
+    },
+    {
+      name: 'no Anthropic credentials on the instance',
+      err: () => kernelError('ModelPassthroughError', 'no Anthropic API key is set on this instance', 'model_passthrough.no_credentials'),
+      status: 503,
+      code: 'model_passthrough.no_credentials',
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name} → ${String(c.status)} ${c.code}`, async () => {
+      fx = await makeFixture({
+        upstream: () => {
+          throw c.err();
+        },
+      });
+      const res = await post(fx.base, OK_BODY, authed);
+      assert.equal(res.status, c.status);
+      const json = (await res.json()) as { code: string; message: string };
+      assert.equal(json.code, c.code);
+      assert.ok(json.message.length > 0);
+      assert.equal(fx.calls.length, 1, 'a refusal is never retried');
+      assert.deepEqual(fx.jobUsage, [], 'nothing metered');
+    });
+  }
+
+  it('a refused OPEN (daily operator budget) maps to 402 and is not cached', async () => {
+    let opens = 0;
+    fx = await makeFixture({
+      upstream: () => sseResponse(FULL_SSE),
+      open: async () => {
+        opens += 1;
+        throw kernelError('ModelWorkBudgetError', "the instance's daily operator-tools budget is used up");
+      },
+    });
+    for (let i = 0; i < 2; i++) {
+      const res = await post(fx.base, OK_BODY, authed);
+      assert.equal(res.status, 402);
+      assert.equal(((await res.json()) as { code: string }).code, 'dev.operator_budget_exhausted');
+    }
+    assert.equal(opens, 2, 'a failed open is asked again, not cached');
+    assert.equal(fx.calls.length, 0, 'nothing is forwarded without an operator job');
+  });
+
+  it('an unknown open failure is a 503, not a hang', async () => {
+    fx = await makeFixture({
+      upstream: () => sseResponse(FULL_SSE),
+      open: async () => {
+        throw new Error('kernel store unavailable');
+      },
+    });
+    const res = await post(fx.base, OK_BODY, authed);
+    assert.equal(res.status, 503);
+    assert.equal(((await res.json()) as { code: string }).code, 'devplatform.model_gateway_error');
+  });
+
+  it('a network failure (not a refusal) is retried once, then succeeds', async () => {
+    fx = await makeFixture({
+      upstream: (_c, attempt) => {
+        if (attempt === 0) throw new TypeError('fetch failed');
+        return sseResponse(FULL_SSE);
+      },
+    });
+    const res = await post(fx.base, OK_BODY, authed);
+    assert.equal(res.status, 200);
+    await res.text();
+    assert.equal(fx.calls.length, 2);
+  });
+
+  it('two network failures answer 502', async () => {
+    fx = await makeFixture({
+      upstream: () => {
+        throw new TypeError('fetch failed');
+      },
+    });
+    const res = await post(fx.base, OK_BODY, authed);
+    assert.equal(res.status, 502);
+    assert.equal(((await res.json()) as { code: string }).code, 'devplatform.upstream_unreachable');
+    assert.equal(fx.calls.length, 2);
+  });
+
+  it('an operator cancel that aborts the call in flight answers 410, not 502', async () => {
+    fx = await makeFixture({
+      upstream: (call) => {
+        // The kernel aborts the job's signal on cancel; the fetch then rejects.
+        fx.opened.find((o) => o.job === call.job)!.controller.abort();
+        throw new DOMException('This operation was aborted', 'AbortError');
+      },
+    });
+    const res = await post(fx.base, OK_BODY, authed);
+    assert.equal(res.status, 410);
+    assert.equal(((await res.json()) as { code: string }).code, 'dev.model_call_refused.cancelled');
+    assert.equal(fx.calls.length, 1, 'a cancelled job is not retried');
+  });
+});
+
+describe('llmProxy — a kernel without the model gateway', () => {
+  let fx: Fixture;
+  afterEach(async () => {
+    if (fx) await fx.close();
+  });
+
+  for (const without of ['both', 'operatorJobs', 'modelPassthrough'] as const) {
+    it(`503 devplatform.model_gateway_unavailable without ${without === 'both' ? 'either service' : without}`, async () => {
+      fx = await makeFixture({ withoutGateway: without, upstream: () => sseResponse(FULL_SSE) });
+      const res = await post(fx.base, OK_BODY, authed);
+      assert.equal(res.status, 503);
+      assert.equal(((await res.json()) as { code: string }).code, 'devplatform.model_gateway_unavailable');
+      assert.equal(fx.calls.length, 0, 'no call of any kind leaves the plugin');
+      assert.equal(fx.opened.length, 0);
+    });
+  }
+});
+
+/** Poll a condition the proxy settles after the response was sent. */
+async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error('condition not met in time');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}

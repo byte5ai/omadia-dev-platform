@@ -26,6 +26,8 @@ import {
   type LlmProxyUsageRecord,
 } from '../src/llmProxy.js';
 import { createDevRunnerRouter, type DevRunnerRouterDeps } from '../src/routes/devRunnerApi.js';
+import { createDevJobOperatorJobs } from '../src/llmOperatorJobs.js';
+import { fakeModelGateway } from './_helpers/fakeModelGateway.js';
 
 /**
  * Epic #470 W4 (spec §5) — LLM budget accounting + enforcement, wired through the
@@ -117,22 +119,18 @@ describe('devplatform/llmProxyAccounting (pg)', { skip: !pgAvailable }, () => {
     },
   });
 
-  const fetchImpl = (async () => {
+  const gateway = fakeModelGateway(() => {
     upstreamCalls += 1;
     return upstream();
-  }) as unknown as typeof fetch;
+  });
 
   const proxyRouter = createLlmProxyRouter({
     resolveJobByToken: (token) => store.resolveJobByToken(token),
-    resolvePolicy: async () => ({
-      provider: 'anthropic',
-      upstreamBaseUrl: 'https://upstream.test',
-      allowedModels: [MODEL],
-    }),
-    resolveProviderKey: async () => 'sk-ant-test-key',
+    resolvePolicy: async () => ({ allowedModels: [MODEL] }),
+    operatorJobs: createDevJobOperatorJobs({ service: gateway.operatorJobs, wallClockMs: 60 * 60_000 }),
+    modelPassthrough: gateway.modelPassthrough,
     addJobUsage: async () => {}, // unused under the budget path
     budget,
-    fetchImpl,
   });
 
   const app = express();
@@ -428,22 +426,18 @@ describe('llmProxy — max_tokens clamp (budget hook ceiling)', () => {
   let server: Server;
   let base = '';
 
-  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
-    forwardedBody = init?.body instanceof Buffer ? init.body.toString('utf8') : String(init?.body ?? '');
+  const gateway = fakeModelGateway((call) => {
+    forwardedBody = call.body;
     return usageResponse(1, 1);
-  }) as unknown as typeof fetch;
+  });
 
   const proxyRouter = createLlmProxyRouter({
     resolveJobByToken: async () => ({ id: 'j1', status: 'running', agentKind: 'claude-cli' }),
-    resolvePolicy: async () => ({
-      provider: 'anthropic',
-      upstreamBaseUrl: 'https://upstream.test',
-      allowedModels: [MODEL],
-    }),
-    resolveProviderKey: async () => 'sk-ant-test-key',
+    resolvePolicy: async () => ({ allowedModels: [MODEL] }),
+    operatorJobs: createDevJobOperatorJobs({ service: gateway.operatorJobs, wallClockMs: 60 * 60_000 }),
+    modelPassthrough: gateway.modelPassthrough,
     addJobUsage: async () => {},
     budget: { maxOutputTokens: CEILING, meter: async () => ({ exceeded: false }) },
-    fetchImpl,
   });
 
   const app = express();
