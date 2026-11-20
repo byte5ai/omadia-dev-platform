@@ -51,6 +51,8 @@ import type {
   RepoAccessResult,
 } from './routes/devPlatformShared.js';
 import { createDevRunnerRouter } from './routes/devRunnerApi.js';
+import type { ModelPassthroughService, OperatorJobsService } from './host/modelGateway.js';
+import { createDevJobOperatorJobs, operatorJobRevoker, type DevJobOperatorJobs } from './llmOperatorJobs.js';
 import { createLlmProxyRouter, type LlmModelPolicy } from './llmProxy.js';
 import { createLlmProxyAccounting } from './llmProxyAccounting.js';
 import { priceForModel } from './host/usageTelemetry.js';
@@ -59,9 +61,8 @@ import type { Pool } from 'pg';
 import type { Express, RequestHandler, Router as ExpressRouter } from 'express';
 
 const DEFAULT_GITHUB_API_BASE = 'https://api.github.com';
-const DEFAULT_LLM_UPSTREAM_BASE_URL = 'https://api.anthropic.com';
-const DEFAULT_LLM_PROVIDER = 'anthropic';
-/** Vault namespace the dev-platform provider keys live under (spec §6b). */
+/** Vault namespace of the dev platform's own secrets (the Fly deploy token).
+ *  It holds no model-provider key: model access goes through the kernel. */
 const DEV_PLATFORM_VAULT_AGENT = 'core:dev-platform';
 /** Vault key holding the Fly deploy token scoped to the runner app (W4). Read per
  *  API call by the FlyMachinesBackend — never held on the instance. */
@@ -86,15 +87,22 @@ export interface WireDevPlatformDeps {
   /** Absolute path to the built shim entry (`dev-runner-shim/dist/src/index.js`). */
   shimEntry: string;
 
+  // --- the kernel's model gateway (spec 2042 §5.10) -------------------------
+  /** `operatorJobs@1` + `modelPassthrough@1`, resolved by `activate()`. The LLM
+   *  proxy reaches models through them and nothing else; either one absent ⇒
+   *  the proxy answers 503 `devplatform.model_gateway_unavailable`. */
+  modelGateway?: {
+    operatorJobs?: OperatorJobsService | undefined;
+    modelPassthrough?: ModelPassthroughService | undefined;
+  };
+
   // --- test seams for the LLM proxy (spec §6b) ------------------------------
   /** Non-operator overrides for the always-mounted LLM proxy. Nothing here comes
    *  from env; the real boot passes none of it. */
   llmSeams?: {
     /** `ANTHROPIC_BASE_URL` handed to api_key jobs. Defaults to `<baseUrl>/api/v1/dev-runner/llm`. */
     proxyBaseUrl?: string;
-    fetchImpl?: typeof fetch;
     resolvePolicy?: (agentKind: string) => Promise<LlmModelPolicy | null>;
-    resolveProviderKey?: (provider: string) => Promise<string | undefined>;
     onAccountingError?: (err: unknown, ctx: { jobId: string; tokensIn: number; tokensOut: number }) => void;
   };
 
@@ -172,6 +180,8 @@ export interface WiredDevPlatform {
   backends: readonly RunnerBackend[];
   finalizeDevJob: (jobId: string, status: DevJobStatus, ctx?: FinalizeContext) => Promise<DevJob | null>;
   applyJob: (jobId: string) => Promise<ApplyJobOutcome>;
+  /** The dev jobs' kernel operator jobs; absent without the model gateway. */
+  operatorJobs: DevJobOperatorJobs | undefined;
   /** Stop every background loop this platform owns (claim worker + gate-deadline
    *  worker). The counterpart to `start()`; index.ts calls it on shutdown. */
   stop: () => void | Promise<void>;
@@ -379,6 +389,27 @@ export function assembleDevPlatform(deps: WireDevPlatformDeps): WiredDevPlatform
   // the job's scoped App tokens — Forge's "finalize has no revokers" gap.
   const revokers = new CredentialRevokerRegistry();
   revokers.register(tokenRegistry.revoker);
+
+  // Spec 2042 §5.10: one kernel operator job per dev job, opened by the LLM
+  // proxy on the job's first model call. The same registry ends it, so EVERY
+  // terminal path closes the job's model access at the kernel too.
+  const operatorJobs = deps.modelGateway?.operatorJobs
+    ? createDevJobOperatorJobs({
+        service: deps.modelGateway.operatorJobs,
+        wallClockMs: cfg.wallClockMs,
+        ...(cfg.llm?.maxModelCallsPerJob !== undefined ? { budgetCalls: cfg.llm.maxModelCallsPerJob } : {}),
+        ...(deps.now ? { now: () => deps.now!().getTime() } : {}),
+        log,
+      })
+    : undefined;
+  if (operatorJobs) revokers.register(operatorJobRevoker(operatorJobs));
+  if (!operatorJobs || !deps.modelGateway?.modelPassthrough) {
+    log(
+      "[dev-platform] the kernel's model gateway (operatorJobs@1 + modelPassthrough@1) is not available — " +
+        'the LLM proxy answers 503 and no api_key job can reach a model. It needs plugin-api 1.78.0 and ' +
+        'this plugin installed as a system module.',
+    );
+  }
   const boundFinalize = (jobId: string, status: DevJobStatus, ctx?: FinalizeContext) =>
     finalizeDevJob(
       {
@@ -482,18 +513,13 @@ export function assembleDevPlatform(deps: WireDevPlatformDeps): WiredDevPlatform
       }
     : undefined;
 
-  const llmProvider = cfg.llm?.provider ?? DEFAULT_LLM_PROVIDER;
-  const llmUpstreamBaseUrl = cfg.llm?.upstreamBaseUrl ?? DEFAULT_LLM_UPSTREAM_BASE_URL;
   const llmAllowedModels = cfg.llm?.allowedModels ?? [];
   const resolvePolicy =
     deps.llmSeams?.resolvePolicy ??
     (async (): Promise<LlmModelPolicy | null> =>
       llmAllowedModels.length === 0
         ? null // unconfigured ⇒ proxy answers 500 "no LLM policy"
-        : { provider: llmProvider, upstreamBaseUrl: llmUpstreamBaseUrl, allowedModels: llmAllowedModels });
-  const resolveProviderKey =
-    deps.llmSeams?.resolveProviderKey ??
-    ((provider: string) => deps.vault.get(DEV_PLATFORM_VAULT_AGENT, `llm/${provider}/api_key`));
+        : { allowedModels: llmAllowedModels });
 
   // W4 (spec §5, Forge #3): every allowed model MUST have a price-table entry, else
   // its cost budget silently NEVER fires (an unpriced model computes $0/call). We do
@@ -535,10 +561,10 @@ export function assembleDevPlatform(deps: WireDevPlatformDeps): WiredDevPlatform
   const llmProxyRouter: ExpressRouter = createLlmProxyRouter({
     resolveJobByToken: (token) => jobStore.resolveJobByToken(token),
     resolvePolicy,
-    resolveProviderKey,
+    operatorJobs,
+    modelPassthrough: deps.modelGateway?.modelPassthrough,
     addJobUsage: (jobId, tokensIn, tokensOut) => jobStore.addJobUsage(jobId, tokensIn, tokensOut),
     budget: budgetHook,
-    ...(deps.llmSeams?.fetchImpl ? { fetchImpl: deps.llmSeams.fetchImpl } : {}),
     ...(deps.llmSeams?.onAccountingError ? { onAccountingError: deps.llmSeams.onAccountingError } : {}),
     log,
   });
@@ -726,9 +752,12 @@ export function assembleDevPlatform(deps: WireDevPlatformDeps): WiredDevPlatform
       worker.start();
       gateDeadlineWorker.start();
     },
-    stop: () => {
+    stop: async () => {
       worker.stop();
-      return gateDeadlineWorker.stop();
+      await gateDeadlineWorker.stop();
+      // A job that outlives this process gets a new operator job on its next
+      // model call; the ones held here are ended rather than left to time out.
+      await operatorJobs?.endAll('dev platform stopped');
     },
     adminRouter,
     runnerRouter,
@@ -737,6 +766,7 @@ export function assembleDevPlatform(deps: WireDevPlatformDeps): WiredDevPlatform
     backends,
     finalizeDevJob: boundFinalize,
     applyJob,
+    operatorJobs,
   };
   return wired;
 }

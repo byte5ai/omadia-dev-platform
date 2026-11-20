@@ -50,16 +50,14 @@ export interface DevPlatformFlyConfig {
 
 /** LLM-proxy policy (spec §6b). */
 export interface DevPlatformLlmConfig {
-  /** `DEV_PLATFORM_LLM_PROVIDER` — vault provider segment. */
-  provider?: string | undefined;
-  /** `DEV_PLATFORM_LLM_UPSTREAM_BASE_URL`. */
-  upstreamBaseUrl?: string | undefined;
   /** `DEV_PLATFORM_LLM_ALLOWED_MODELS`, already split. Empty ⇒ the proxy 500s. */
   allowedModels?: readonly string[] | undefined;
   /** `DEV_JOB_DEFAULT_BUDGET_USD`. */
   defaultBudgetCostUsd?: number | undefined;
   /** `DEV_JOB_MAX_OUTPUT_TOKENS` — the `max_tokens` clamp ceiling. */
   maxOutputTokens?: number | undefined;
+  /** `llm_max_model_calls` — the kernel operator job's model-call budget per dev job. */
+  maxModelCallsPerJob?: number | undefined;
 }
 
 /** GitHub webhook trigger controls (spec §3). Read by the mount site, not the assembly. */

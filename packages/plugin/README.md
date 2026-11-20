@@ -1,6 +1,8 @@
 # @omadia/dev-platform
 
-The Omadia Dev Platform as an installable plugin. `kind: extension`.
+The Omadia Dev Platform as an installable plugin. `kind: system-module` — its
+model access goes through the kernel's model gateway (`operatorJobs@1` +
+`modelPassthrough@1`); it holds no model-provider key.
 
 This README ships **inside the plugin ZIP**, so it is written for whoever
 installs the artifact rather than for whoever builds it. Build and contribution
@@ -20,8 +22,14 @@ workers, and **nine database tables it migrates itself**.
 
 ## Before you install
 
-- **omadia core ≥ 1.5** (`@omadia/plugin-api` 1.5.0) — the newest extension
-  point used here is `ctx.sql.seedLedger`, the migration handoff.
+- **omadia core with `@omadia/plugin-api` 1.78.0 or newer** — the kernel that
+  loads the `system-module` kind and publishes the model gateway.
+- **The instance's Anthropic model provider, configured.** The Claude CLI in a
+  job's runner talks to this plugin's LLM proxy; the proxy forwards each call
+  through the kernel, which adds the instance's Anthropic credentials. There is
+  no API-key setting here. Without a key on the instance every model call
+  answers 503 `model_passthrough.no_credentials`; without the gateway (an older
+  kernel) 503 `devplatform.model_gateway_unavailable`.
 - **A Postgres-backed knowledge graph.** The job, repo, gate and artifact tables
   live in `graphPool`. With an in-memory graph the plugin **refuses to
   activate** rather than pretending to work.

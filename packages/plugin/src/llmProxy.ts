@@ -6,18 +6,28 @@
  * ONE thing that keeps provider API keys out of job containers: the Claude CLI
  * inside a job is handed `ANTHROPIC_BASE_URL` → here and a per-job bearer as its
  * `ANTHROPIC_AUTH_TOKEN`; this proxy validates that bearer as a job token,
- * swaps in the real provider key from Vault, and forwards. No provider key ever
- * exists in a job container's env or filesystem.
+ * applies the job's policy and forwards. No provider key ever exists in a job
+ * container's env or filesystem.
+ *
+ * Spec 2042 §5.10 — the dev platform is a system module and holds NO provider
+ * key either. The forward goes through the kernel's model gateway: each dev
+ * job's calls run inside one kernel operator job (`operatorJobs@1`, see
+ * `llmOperatorJobs.ts`), and `modelPassthrough@1` adds the instance's
+ * Anthropic credentials and admits the call. There is no direct provider call
+ * in this plugin; without the two services the proxy answers 503.
  *
  * Contract confirmed by the option-D spike (issue #470 comment 4929394900): the
  * CLI probes `GET <base>/` once (must be 2xx), then `POST <base>/v1/messages?beta=true`
  * with `Authorization: Bearer <token>`. Both are served here.
  *
  * Wiring (out of this unit's scope — see the DockerBackend/wire units) builds a
- * router via `createLlmProxyRouter` with real store/Vault/usage seams and passes
- * it to `createDevRunnerRouter({ llmProxyRouter })`, which mounts it at `/llm`.
+ * router via `createLlmProxyRouter` with real store/gateway/usage seams and
+ * passes it to `createDevRunnerRouter({ llmProxyRouter })`, which mounts it at
+ * `/llm`.
  *
  * Failure semantics (spec §6b step 5):
+ *   - a gateway refusal (call budget, deadline, cancel, kill switch, no
+ *     credentials) → a JSON 4xx/503 naming it, never retried (`modelGateway.ts`).
  *   - upstream 429 → passed through verbatim, incl. `Retry-After`.
  *   - upstream 5xx → retried ONCE — but only before any bytes reach the client.
  *     A streamed request that already emitted tokens is NEVER retried (a retry
@@ -29,12 +39,20 @@
 import { Router, raw as expressRaw } from 'express';
 import type { Request, Response } from 'express';
 
+import {
+  classifyGatewayError,
+  type ModelPassthroughService,
+  type OperatorJob,
+} from './host/modelGateway.js';
 import { recordUsage as defaultRecordUsage } from './host/usageTelemetry.js';
+import { DevJobOperatorJobEndedError, terminalOutcome, type DevJobOperatorJobs } from './llmOperatorJobs.js';
+import { StreamRedactor, redactCredentials } from './llmProxyRedaction.js';
+import { applyUsage, drainSse, newUsage, type UsageAccumulator } from './llmProxyUsage.js';
 import { isTerminalDevJobStatus, type DevJobStatus } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Injected seams. Each is the narrow slice this proxy needs; the wire unit
-// binds the real store/Vault/ctx.llm-gate/usage-ledger implementations.
+// binds the real store/model-gateway/usage-ledger implementations.
 // ---------------------------------------------------------------------------
 
 /** The minimal job view the proxy needs, resolved from the bearer token alone
@@ -42,17 +60,17 @@ import { isTerminalDevJobStatus, type DevJobStatus } from './types.js';
 export interface LlmProxyJob {
   readonly id: string;
   readonly status: DevJobStatus;
-  /** `dev_jobs.agent_kind` — drives the provider + model-allowlist lookup. */
+  /** `dev_jobs.agent_kind` — drives the model-allowlist lookup. */
   readonly agentKind: string;
+  /** `dev_jobs.created_by` — recorded as who started the kernel operator job. */
+  readonly createdBy?: string | undefined;
+  /** `dev_jobs.started_at` — bounds the operator job by the remaining wall clock. */
+  readonly startedAt?: string | null | undefined;
 }
 
 /** Effective LLM policy for a job's agent kind (the `ctx.llm` gate's allowlist
  *  semantics, not a second one). */
 export interface LlmModelPolicy {
-  /** Vault key segment: namespace `core:dev-platform`, key `llm/<provider>/api_key`. */
-  readonly provider: string;
-  /** Upstream origin, e.g. `https://api.anthropic.com` (no trailing slash needed). */
-  readonly upstreamBaseUrl: string;
   /** Exact model ids this agent kind may call. A model outside the list → 403. */
   readonly allowedModels: readonly string[];
 }
@@ -106,10 +124,14 @@ export interface LlmProxyBudgetHook {
 export interface LlmProxyDeps {
   /** Resolve a job from its phone-home bearer token (sha256-hash match) or null. */
   resolveJobByToken(token: string): Promise<LlmProxyJob | null>;
-  /** Resolve the provider + upstream + model allowlist for an agent kind. */
+  /** Resolve the model allowlist for an agent kind. */
   resolvePolicy(agentKind: string): Promise<LlmModelPolicy | null>;
-  /** Fetch the provider API key from Vault (`core:dev-platform` / `llm/<p>/api_key`). */
-  resolveProviderKey(provider: string): Promise<string | undefined>;
+  /** The dev jobs' kernel operator jobs (`operatorJobs@1`). Absent (a kernel
+   *  without the model gateway) ⇒ every call answers 503. */
+  operatorJobs?: DevJobOperatorJobs | undefined;
+  /** The kernel's Anthropic Messages passthrough (`modelPassthrough@1`) — the
+   *  ONLY way this proxy reaches a model. Absent ⇒ every call answers 503. */
+  modelPassthrough?: ModelPassthroughService | undefined;
   /** Atomic per-job increment: `UPDATE dev_jobs SET tokens_in = tokens_in + $1,
    *  tokens_out = tokens_out + $2 …`. W1 records; W4 enforces budget on the same statement. */
   addJobUsage(jobId: string, tokensIn: number, tokensOut: number): Promise<void>;
@@ -123,8 +145,6 @@ export interface LlmProxyDeps {
    *  loss is surfaced (and counted) rather than swallowed. Default: no-op (the
    *  error is still logged at error level). */
   onAccountingError?: (err: unknown, ctx: { jobId: string; tokensIn: number; tokensOut: number }) => void;
-  /** Upstream fetch (test seam). Default: global `fetch`. */
-  fetchImpl?: typeof fetch;
   /** Structured log sink (e.g. mid-stream truncation notes). */
   log?: (msg: string) => void;
   /** Hard cap on a forwarded request body, in bytes. Default 25 MiB. */
@@ -141,13 +161,16 @@ const DEFAULT_MAX_BODY_BYTES = 25 * 1024 * 1024;
  *  clamp being wired (Forge W4 audit #2). A real LLM response is far under this. */
 const MAX_ENFORCED_BUFFER_BYTES = 32 * 1024 * 1024;
 const USAGE_SOURCE = 'dev-job';
+const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 
 /**
  * The ONLY client request headers forwarded upstream (allowlist, not denylist —
  * the same lesson the W0 shim env learned). Everything else a hostile job
  * container sends — `cookie`, `x-forwarded-*`, `proxy-authorization`, the client
- * `authorization`/`x-api-key`, and every hop-by-hop header — is dropped. The
- * provider key + `content-type` + `anthropic-version` are attached server-side.
+ * `authorization`/`x-api-key`, and every hop-by-hop header — is dropped here,
+ * before the kernel sees the request. `content-type` + `anthropic-version` are
+ * set here; the KERNEL attaches the credentials (and applies the same
+ * allowlist again on its side).
  */
 const FORWARDED_REQUEST_HEADERS = new Set([
   'accept',
@@ -158,8 +181,9 @@ const FORWARDED_REQUEST_HEADERS = new Set([
 
 /** Response headers not copied back: hop-by-hop + encoding/length that Node's
  *  fetch has already decoded away and express will recompute, PLUS auth-like
- *  headers an upstream/intermediary might echo — the provider key must never be
- *  handed back to the container the proxy exists to keep it away from. */
+ *  headers an upstream/intermediary might echo — the instance's provider key
+ *  must never be handed back to the container the proxy exists to keep it away
+ *  from. */
 const STRIPPED_RESPONSE_HEADERS = new Set([
   'connection',
   'transfer-encoding',
@@ -188,126 +212,6 @@ function bearerToken(req: Request): string | null {
   return m ? m[1]!.trim() || null : null;
 }
 
-/** Replace every occurrence of `secret` (a byte sequence) in `buf` with
- *  `[REDACTED]`, operating on raw bytes via a latin1 round-trip (1:1 with
- *  bytes, so arbitrary binary is preserved). Returns `buf` unchanged when the
- *  secret is empty or absent. */
-function redactBytes(buf: Buffer, secretLatin: string): Buffer {
-  if (secretLatin.length === 0) return buf;
-  const latin = buf.toString('latin1');
-  if (!latin.includes(secretLatin)) return buf;
-  return Buffer.from(latin.split(secretLatin).join('[REDACTED]'), 'latin1');
-}
-
-/**
- * Rolling redactor for the STREAMED response path (review S-finding): an
- * upstream error event on a `text/event-stream` reaches the job container
- * verbatim, so an echoed provider key would leak — the exact thing the proxy
- * exists to prevent. This scans each chunk for the provider-key bytes before
- * they are written downstream, holding back the last `N-1` bytes (N = key
- * length) across chunk boundaries so the secret cannot be smuggled split over
- * two chunks. `flush()` emits the retained tail once the stream ends.
- */
-class StreamRedactor {
-  private carry = Buffer.alloc(0);
-  private readonly secretLatin: string;
-  private readonly keep: number;
-  constructor(secret: string) {
-    // Match on the secret's raw UTF-8 bytes, expressed as a latin1 string.
-    this.secretLatin = Buffer.from(secret, 'utf8').toString('latin1');
-    this.keep = Math.max(0, this.secretLatin.length - 1);
-  }
-  /** Feed one upstream chunk; return the bytes safe to write to the client now. */
-  push(chunk: Buffer): Buffer {
-    if (this.secretLatin.length === 0) return chunk;
-    const combined = this.carry.length > 0 ? Buffer.concat([this.carry, chunk]) : chunk;
-    const redacted = redactBytes(combined, this.secretLatin);
-    if (redacted.length <= this.keep) {
-      this.carry = Buffer.from(redacted);
-      return Buffer.alloc(0);
-    }
-    const emit = Buffer.from(redacted.subarray(0, redacted.length - this.keep));
-    this.carry = Buffer.from(redacted.subarray(redacted.length - this.keep));
-    return emit;
-  }
-  /** Emit the held-back tail (< N bytes — can never contain a full secret). */
-  flush(): Buffer {
-    const out = this.carry;
-    this.carry = Buffer.alloc(0);
-    return out;
-  }
-}
-
-interface UsageAccumulator {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  seen: boolean;
-}
-
-function newUsage(): UsageAccumulator {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, seen: false };
-}
-
-/** Pull Anthropic `usage` numbers out of a parsed event/body object. `message_start`
- *  carries input + cache + initial output; `message_delta` carries cumulative output;
- *  a non-streamed JSON body carries the final totals top-level. */
-function applyUsage(acc: UsageAccumulator, u: unknown): void {
-  if (!u || typeof u !== 'object') return;
-  const r = u as Record<string, unknown>;
-  if (typeof r['input_tokens'] === 'number') {
-    acc.inputTokens = r['input_tokens'];
-    acc.seen = true;
-  }
-  if (typeof r['output_tokens'] === 'number') {
-    acc.outputTokens = r['output_tokens'];
-    acc.seen = true;
-  }
-  if (typeof r['cache_read_input_tokens'] === 'number') {
-    acc.cacheReadTokens = r['cache_read_input_tokens'];
-    acc.seen = true;
-  }
-  if (typeof r['cache_creation_input_tokens'] === 'number') {
-    acc.cacheCreationTokens = r['cache_creation_input_tokens'];
-    acc.seen = true;
-  }
-}
-
-/** Feed one parsed SSE `data:` JSON object into the accumulator. */
-function ingestSseData(acc: UsageAccumulator, data: unknown): void {
-  if (!data || typeof data !== 'object') return;
-  const d = data as Record<string, unknown>;
-  const type = d['type'];
-  if (type === 'message_start') {
-    const msg = d['message'];
-    if (msg && typeof msg === 'object') applyUsage(acc, (msg as Record<string, unknown>)['usage']);
-  } else if (type === 'message_delta') {
-    applyUsage(acc, d['usage']);
-  }
-}
-
-/** Stateful SSE splitter: events are separated by a blank line; each `data:` line
- *  holds JSON. Returns the unconsumed tail to prepend to the next chunk. */
-function drainSse(acc: UsageAccumulator, buffer: string): string {
-  let idx: number;
-  while ((idx = buffer.indexOf('\n\n')) !== -1) {
-    const block = buffer.slice(0, idx);
-    buffer = buffer.slice(idx + 2);
-    const dataLines: string[] = [];
-    for (const line of block.split('\n')) {
-      if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
-    }
-    if (dataLines.length === 0) continue;
-    try {
-      ingestSseData(acc, JSON.parse(dataLines.join('\n')));
-    } catch {
-      /* partial/non-JSON event — ignore for metering, still passed through verbatim */
-    }
-  }
-  return buffer;
-}
-
 /** Write a chunk to the client, honoring backpressure so a slow client cannot
  *  make us buffer the whole upstream stream in memory. */
 function writeChunk(res: Response, chunk: Uint8Array): Promise<void> {
@@ -329,12 +233,12 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
   const {
     resolveJobByToken,
     resolvePolicy,
-    resolveProviderKey,
+    operatorJobs,
+    modelPassthrough,
     addJobUsage,
     budget,
     recordUsage = defaultRecordUsage,
     onAccountingError = () => {},
-    fetchImpl = fetch,
     log = () => {},
     maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
   } = deps;
@@ -372,11 +276,15 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
     //    it converges by exiting; every OTHER terminal answers 410. The store's
     //    `resolveJobByToken` deliberately surfaces `budget_exceeded` (and only it)
     //    among terminals for exactly this signal — see its note.
+    //    A terminal job also ends its kernel operator job (the finalize revoker
+    //    normally did already; this covers a finalize on another replica).
     if (job.status === 'budget_exceeded') {
+      endOperatorJob(job);
       fail(res, 402, 'dev.budget_exceeded', 'job LLM budget exhausted');
       return;
     }
     if (isTerminalDevJobStatus(job.status)) {
+      endOperatorJob(job);
       fail(res, 410, 'devplatform.job_terminal', 'job has reached a terminal state');
       return;
     }
@@ -432,55 +340,106 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
         typeof requested === 'number' && requested > 0 ? Math.min(requested, ceiling) : ceiling;
     }
 
-    // 5. Attach the provider key from Vault. Never surfaced to the caller.
-    const providerKey = await resolveProviderKey(policy.provider);
-    if (!providerKey) {
-      fail(res, 500, 'devplatform.provider_key_unavailable', 'no provider key configured');
+    // 5. The kernel's model gateway is the only way to a model. A kernel
+    //    without it (older than plugin-api 1.78.0, or this plugin not running
+    //    as a system module) gets a named 503 — never a direct provider call.
+    if (!operatorJobs || !modelPassthrough) {
+      fail(
+        res,
+        503,
+        'devplatform.model_gateway_unavailable',
+        "the kernel's model gateway (operatorJobs@1 + modelPassthrough@1) is not available to the dev platform",
+      );
       return;
     }
 
-    // 6. Forward the CANONICAL body (re-serialised from the parsed object, with
-    //    content-length recomputed by fetch). `?beta=true` (and any other
-    //    query) is preserved.
+    // 6. The dev job's operator job: opened on its first call, then reused.
+    let operatorJob: OperatorJob;
+    try {
+      operatorJob = await operatorJobs.acquire(job);
+    } catch (err) {
+      failGateway(res, job, err);
+      return;
+    }
+
+    // 7. Forward the CANONICAL body (re-serialised from the parsed object).
+    //    `?beta=true` (and any other query) is preserved.
     const queryIdx = req.originalUrl.indexOf('?');
     const query = queryIdx === -1 ? '' : req.originalUrl.slice(queryIdx);
-    const upstreamUrl = `${policy.upstreamBaseUrl.replace(/\/+$/, '')}/v1/messages${query}`;
-    const headers = buildForwardHeaders(req, providerKey);
-    const streamed = parsedObj['stream'] === true;
     const forwardBody = Buffer.from(JSON.stringify(parsedObj), 'utf8');
+
+    // A runner that hangs up stops the upstream call instead of leaving it
+    // streaming (and billing) into a closed socket.
+    const clientGone = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) clientGone.abort();
+    });
 
     await proxyUpstream({
       res,
       job,
       model,
-      streamed,
-      upstreamUrl,
-      headers,
-      body: forwardBody,
-      providerKey,
+      forward: () =>
+        modelPassthrough.forwardAnthropicMessages({
+          job: operatorJob,
+          query,
+          headers: buildForwardHeaders(req),
+          body: forwardBody,
+          signal: clientGone.signal,
+        }),
+      operatorJob,
     });
+  }
+
+  /** End a terminal dev job's operator job, without holding up the answer. */
+  function endOperatorJob(job: LlmProxyJob): void {
+    if (!operatorJobs) return;
+    void operatorJobs.end(job.id, terminalOutcome(job.status));
+  }
+
+  /** Answer a gateway refusal as a named JSON error; anything else as a 503. */
+  function failGateway(res: Response, job: LlmProxyJob, err: unknown): void {
+    if (err instanceof DevJobOperatorJobEndedError) {
+      fail(res, 410, 'devplatform.job_terminal', 'job has reached a terminal state');
+      return;
+    }
+    const refusal = classifyGatewayError(err);
+    log(`[dev-llm] model gateway refused job ${job.id}: ${errText(err)}`);
+    if (refusal) {
+      fail(res, refusal.status, refusal.code, refusal.message);
+      return;
+    }
+    fail(res, 503, 'devplatform.model_gateway_error', 'the model gateway could not open an operator job for this dev job');
   }
 
   async function proxyUpstream(args: {
     res: Response;
     job: LlmProxyJob;
     model: string;
-    streamed: boolean;
-    upstreamUrl: string;
-    headers: Record<string, string>;
-    body: Buffer;
-    providerKey: string;
+    forward: () => Promise<globalThis.Response>;
+    operatorJob: OperatorJob;
   }): Promise<void> {
-    const { res, job, model, upstreamUrl, headers, body, providerKey } = args;
+    const { res, job, model, forward, operatorJob } = args;
 
     // Retry loop: a 5xx or a connect error may be retried ONCE — but only here,
     // BEFORE any byte reaches the client. Once streaming starts, this loop is
-    // gone, so a streamed request that emitted tokens can never be retried.
-    let upstream: Awaited<ReturnType<typeof fetchImpl>> | undefined;
+    // gone, so a streamed request that emitted tokens can never be retried. A
+    // gateway REFUSAL is never retried: it answers at once with what refused.
+    let upstream: globalThis.Response | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        upstream = await fetchImpl(upstreamUrl, { method: 'POST', headers, body });
+        upstream = await forward();
       } catch (err) {
+        if (classifyGatewayError(err)) {
+          failGateway(res, job, err);
+          return;
+        }
+        if (operatorJob.signal.aborted) {
+          // The operator cancelled the job (or its deadline passed) mid-call.
+          fail(res, 410, 'dev.model_call_refused.cancelled', 'the operator job of this dev job was cancelled or reached its deadline');
+          return;
+        }
+        if (res.destroyed) return; // the runner hung up; nobody to answer
         if (attempt === 0) continue; // one retry on a connect-level failure
         fail(res, 502, 'devplatform.upstream_unreachable', 'LLM provider is unreachable');
         log(`[dev-llm] upstream unreachable for job ${job.id}: ${errText(err)}`);
@@ -514,17 +473,20 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
     const contentType = (upstream.headers.get('content-type') ?? '').toLowerCase();
     const isSse = contentType.includes('text/event-stream');
 
-    // Non-stream ERROR bodies are buffered and defensively scrubbed of the
-    // provider key before they reach the container: an upstream/intermediary
-    // that reflects the request (incl. the injected key) into an error payload
-    // must not hand it to the job. Not metered (no usage), so budget enforcement
-    // never engages here. Success bodies stream/deliver verbatim (below).
+    // Non-stream ERROR bodies are buffered and defensively scrubbed of
+    // credential-shaped strings before they reach the container: an
+    // upstream/intermediary that reflects the request (incl. the key the kernel
+    // injected) into an error payload must not hand it to the job. Not metered
+    // (no usage), so budget enforcement never engages here. Success bodies
+    // stream/deliver through the same redactor (below).
     if (!isSse && upstream.status >= 400) {
       copyStatusHeaders();
-      let errBody = Buffer.from(await upstream.arrayBuffer());
-      if (providerKey.length > 0) {
-        const scrubbed = errBody.toString('utf8').split(providerKey).join('[REDACTED]');
-        errBody = Buffer.from(scrubbed, 'utf8');
+      let errBody: Buffer;
+      try {
+        errBody = redactCredentials(Buffer.from(await upstream.arrayBuffer()));
+      } catch (err) {
+        log(`[dev-llm] error body unreadable for job ${job.id}: ${errText(err)}`);
+        errBody = Buffer.alloc(0);
       }
       res.removeHeader('content-length');
       res.end(errBody);
@@ -540,7 +502,6 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
         job,
         model,
         body: upstream.body as AsyncIterable<Uint8Array>,
-        providerKey,
         isSse,
         copyStatusHeaders,
       });
@@ -553,10 +514,11 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
     let sseBuffer = '';
     let jsonBuffer = '';
     let truncated = false;
-    // Redact the provider key from every byte written downstream (incl. streamed
-    // SSE error events an upstream might echo it into). A rolling window holds
-    // back the last N-1 bytes so the secret cannot be split across two chunks.
-    const redactor = new StreamRedactor(providerKey);
+    // Redact credential-shaped strings from every byte written downstream (incl.
+    // streamed SSE error events an upstream might echo the key into). The
+    // redactor holds back a possible credential start, so one cannot be split
+    // across two chunks.
+    const redactor = new StreamRedactor();
 
     try {
       for await (const chunk of upstream.body as AsyncIterable<Uint8Array>) {
@@ -658,7 +620,6 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
     job: LlmProxyJob;
     model: string;
     body: AsyncIterable<Uint8Array>;
-    providerKey: string;
     isSse: boolean;
     copyStatusHeaders: () => void;
   }): Promise<void> {
@@ -668,7 +629,7 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
     let sseBuffer = '';
     let jsonBuffer = '';
     let truncated = false;
-    const redactor = new StreamRedactor(args.providerKey);
+    const redactor = new StreamRedactor();
     const chunks: Buffer[] = [];
     let bytesRead = 0;
 
@@ -751,11 +712,12 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
   return router;
 }
 
-/** Build the upstream request headers from an ALLOWLIST (not a scrub-list), then
- *  attach the provider key as `x-api-key`. Any header not explicitly allowed —
- *  cookies, `x-forwarded-*`, `proxy-authorization`, the client's own auth, and
- *  all hop-by-hop headers — never reaches upstream. */
-function buildForwardHeaders(req: Request, providerKey: string): Record<string, string> {
+/** Build the forwarded request headers from an ALLOWLIST (not a scrub-list). Any
+ *  header not explicitly allowed — cookies, `x-forwarded-*`,
+ *  `proxy-authorization`, the client's own auth, and all hop-by-hop headers —
+ *  never reaches the kernel or upstream. Keys are lower-case, the shape the
+ *  passthrough reads. The kernel adds the credentials. */
+function buildForwardHeaders(req: Request): Record<string, string> {
   const out: Record<string, string> = {};
   // Headers named by the `Connection` header are hop-by-hop and MUST be stripped
   // by a proxy (RFC 7230 §6.1). A client that writes `Connection: anthropic-beta`
@@ -774,13 +736,10 @@ function buildForwardHeaders(req: Request, providerKey: string): Record<string, 
     const lower = key.toLowerCase();
     if (connectionNamed.has(lower)) continue; // hop-by-hop per the Connection header
     if (!FORWARDED_REQUEST_HEADERS.has(lower)) continue;
-    out[key] = Array.isArray(value) ? value.join(', ') : value;
+    out[lower] = Array.isArray(value) ? value.join(', ') : value;
   }
-  // Server-injected, overriding any allowlisted client copy.
-  out['x-api-key'] = providerKey;
-  if (!Object.keys(out).some((k) => k.toLowerCase() === 'anthropic-version')) {
-    out['anthropic-version'] = '2023-06-01';
-  }
+  out['anthropic-version'] ??= DEFAULT_ANTHROPIC_VERSION;
+  // The body is the canonical JSON re-serialisation (step 7), whatever the client claimed.
   out['content-type'] = 'application/json';
   return out;
 }

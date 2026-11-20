@@ -97,8 +97,11 @@ docs/                  operator guide, secrets, supply chain, acceptance runs
 ```
 
 `packages/plugin` is what installs into an Omadia host. Its `manifest.yaml` is
-the file the hub reads, and `identity.kind` is **`extension`** — see the comment
-in that file for why not `integration` or `tool`.
+the file the hub reads, and `identity.kind` is **`system-module`**: omadia
+infrastructure, not a capability an agent calls. Its model access goes through
+the kernel's model gateway (`operatorJobs@1` + `modelPassthrough@1`, plugin-api
+1.78.0), so it holds no model-provider key — the instance's Anthropic model
+provider must be configured. See `packages/plugin/SEAMS.md` S10.
 
 ## Building it
 
@@ -109,7 +112,7 @@ npm install
 npm run typecheck
 npm run build
 npm test
-npm run package -w packages/plugin   # → packages/plugin/out/omadia-dev-platform-0.3.1.zip
+npm run package -w packages/plugin   # → packages/plugin/out/omadia-dev-platform-<version>.zip
 ```
 
 `npm run package` refuses to build if `identity.version` in `manifest.yaml` and

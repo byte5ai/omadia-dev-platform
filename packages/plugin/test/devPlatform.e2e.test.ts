@@ -36,6 +36,7 @@ import type {
   RunnerHandle,
 } from '../src/types.js';
 import { listenLoopback } from './_helpers/listenLoopback.js';
+import { fakeModelGateway } from './_helpers/fakeModelGateway.js';
 
 /**
  * Epic #470 W0 — the wire unit's end-to-end proof (spec §11/§12). Two parts:
@@ -263,6 +264,13 @@ describe('devplatform e2e (pg)', { skip: !pgAvailable }, () => {
   let server: ReturnType<express.Express['listen']>;
   let baseUrl = '';
   let wired: ReturnType<typeof assembleDevPlatform>;
+  const gateway = fakeModelGateway(
+    () =>
+      new Response(JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+  );
   let repo: DevRepo;
 
   // A fake requireAuth: a session iff the `x-test-sub` header is present. It
@@ -336,7 +344,9 @@ describe('devplatform e2e (pg)', { skip: !pgAvailable }, () => {
       createdBy: MARK,
     });
     await credentials.save(repo.id, { token: 'ghp_e2e_token', kind: 'pat', login: 'e2e-owner' });
-    // W1 keystone: the LLM proxy resolves the provider key from this Vault slot.
+    // Spec 2042 §5.10: the plugin holds NO provider key; the (fake) kernel
+    // gateway below is the only way to a model. A key planted in the plugin's
+    // vault must never be read or forwarded.
     await vault.set('core:dev-platform', 'llm/anthropic/api_key', E2E_PROVIDER_KEY);
 
     const app = express();
@@ -372,14 +382,9 @@ describe('devplatform e2e (pg)', { skip: !pgAvailable }, () => {
       shimEntry: '/dev/null',
       backends: [fakeBackend],
       forgeFactory: () => stubForge,
-      llmSeams: {
-        // A fake upstream so a POST reaches the proxy without real network.
-        fetchImpl: (async () =>
-          new Response(JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 } }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          })) as unknown as typeof fetch,
-      },
+      // The kernel's model gateway, faked, so a POST reaches "upstream"
+      // without real network — the same seam activate() fills.
+      modelGateway: { operatorJobs: gateway.operatorJobs, modelPassthrough: gateway.modelPassthrough },
     });
     mountDevPlatform(app, requireAuth, wired);
   });
@@ -597,6 +602,12 @@ describe('devplatform e2e (pg)', { skip: !pgAvailable }, () => {
     // fake upstream returns 200.
     assert.equal(reached.status, 200, 'a valid job token reaches the proxy and the upstream');
     await reached.text();
+    assert.equal(gateway.opened.length, 1, "the dev job's model call ran inside one kernel operator job");
+    assert.equal(gateway.opened[0]!.input.startedBy, MARK, "the dev job's requester started it");
+    assert.ok(
+      !JSON.stringify(gateway.calls.map((c) => c.headers)).includes(E2E_PROVIDER_KEY),
+      "the plugin never forwards a key from its own vault",
+    );
 
     // The allowlist actually runs inside the proxy: a forbidden model → 403.
     const { token: token2 } = await provisionedJob();

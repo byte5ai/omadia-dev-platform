@@ -840,10 +840,13 @@ export class DevJobStore {
    *  as a valid-token / job-state oracle. The proxy's own terminal→410 branch
    *  remains as defence-in-depth for any caller that surfaces a terminal job by
    *  other means. */
-  async resolveJobByToken(token: string): Promise<Pick<DevJob, 'id' | 'status' | 'agentKind'> | null> {
+  async resolveJobByToken(
+    token: string,
+  ): Promise<Pick<DevJob, 'id' | 'status' | 'agentKind' | 'createdBy' | 'startedAt'> | null> {
     if (typeof token !== 'string' || token.length === 0) return null;
     const r = await this.pool.query<Row>(
-      `SELECT id, status, agent_kind, runner_token_hash FROM dev_jobs WHERE runner_token_hash = $1`,
+      `SELECT id, status, agent_kind, created_by, started_at, runner_token_hash
+         FROM dev_jobs WHERE runner_token_hash = $1`,
       [hashRunnerToken(token)],
     );
     const row = r.rows[0];
@@ -857,7 +860,15 @@ export class DevJobStore {
     // OTHER terminal returns null so a stale-token holder gets no valid/terminal
     // state oracle (the proxy answers 401 for both unknown and stale tokens).
     if (isTerminalDevJobStatus(status) && status !== 'budget_exceeded') return null;
-    return { id: str(row['id']), status, agentKind: str(row['agent_kind']) };
+    // `createdBy` + `startedAt` open the job's kernel operator job (who asked
+    // for it, how much wall clock is left) on its first model call.
+    return {
+      id: str(row['id']),
+      status,
+      agentKind: str(row['agent_kind']),
+      createdBy: str(row['created_by']),
+      startedAt: isoN(row['started_at']),
+    };
   }
 
   /** Atomic per-job usage increment (spec §6b/§ W4). One statement so a
