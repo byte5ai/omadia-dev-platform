@@ -36,10 +36,10 @@ consent (§4).
 
 | Requirement | Why |
 |---|---|
-| **omadia core with `@omadia/plugin-api` 1.77.0 or newer** | The floor since 0.4.0: the kernel that loads the `system-module` kind and publishes the model gateway (`operatorJobs@1` + `modelPassthrough@1`). It contains everything older floors named — `ctx.sql.seedLedger` (1.5.0) and `permissions.sql.handoff` (1.6.0, G7, §12). |
+| **omadia core with `@omadia/plugin-api` 1.78.0 or newer** | The floor since 0.4.0: the kernel that loads the `system-module` kind and publishes the model gateway (`operatorJobs@1` + `modelPassthrough@1`). It contains everything older floors named — `ctx.sql.seedLedger` (1.5.0) and `permissions.sql.handoff` (1.6.0, G7, §12). |
 | **Postgres-backed knowledge graph** | The job, repo, gate and artifact tables live in `graphPool`. With an in-memory graph the plugin **refuses to activate** rather than pretending to work — set `DATABASE_URL` and install the Neon knowledge-graph plugin first. |
 | **A runner backend** | Fly Machines or local Docker. See §6. |
-| **The instance's Anthropic model provider** | The plugin holds no provider key. Its LLM proxy forwards through the kernel's model gateway (`operatorJobs@1` + `modelPassthrough@1`, plugin-api 1.77.0), which adds the instance's Anthropic credentials. Each dev job's model calls run inside one kernel operator job (model-call budget `llm_max_model_calls`, deadline = the job's remaining wall clock). |
+| **The instance's Anthropic model provider** | The plugin holds no provider key. Its LLM proxy forwards through the kernel's model gateway (`operatorJobs@1` + `modelPassthrough@1`, plugin-api 1.78.0), which adds the instance's Anthropic credentials. Each dev job's model calls run inside one kernel operator job (model-call budget `llm_max_model_calls`, deadline = the job's remaining wall clock). |
 
 `graphPool@1` is the plugin's only hard capability requirement. If core cannot
 provide it, install is refused with HTTP 409 `install.missing_capability`.

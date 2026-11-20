@@ -341,7 +341,7 @@ export function createLlmProxyRouter(deps: LlmProxyDeps): Router {
     }
 
     // 5. The kernel's model gateway is the only way to a model. A kernel
-    //    without it (older than plugin-api 1.77.0, or this plugin not running
+    //    without it (older than plugin-api 1.78.0, or this plugin not running
     //    as a system module) gets a named 503 — never a direct provider call.
     if (!operatorJobs || !modelPassthrough) {
       fail(
